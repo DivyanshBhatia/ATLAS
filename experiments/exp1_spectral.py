@@ -441,57 +441,27 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
                 print(f"  SmallNORB HF load failed: {e}")
 
         if task_name in ('dsprites_loc', 'dsprites_ori'):
-            # Try multiple HF sources
-            for hf_name in ['randall-lab/dsprites', 'dpdl-benchmark/dsprites',
-                            'galilai-group/dsprites']:
-                try:
-                    ds = load_dataset(hf_name, split='train')
-                    cols = ds.column_names
-                    print(f"  dSprites columns ({hf_name}): {cols}")
+            try:
+                ds = load_dataset('randall-lab/dsprites', split='train',
+                                  trust_remote_code=True)
+                print(f"  Loaded dSprites (randall-lab): {len(ds)} samples")
 
-                    if task_name == 'dsprites_loc':
-                        def loc_label(item):
-                            # randall-lab format: posX is direct column
-                            for key in ['posX', 'label_x_position', 'x_position']:
-                                if key in item:
-                                    val = item[key]
-                                    if isinstance(val, (int, float)):
-                                        if val <= 1.0:
-                                            return min(int(float(val) * 16), 15)
-                                        else:
-                                            return min(int(val), 15)
-                            # Try label list (randall-lab: label=[color,shape,scale,ori,posX,posY])
-                            if 'label' in item and isinstance(item['label'], (list, tuple)):
-                                return min(item['label'][4] % 16, 15)
-                            return 0
-                        label_fn = loc_label
-                    else:
-                        def ori_label(item):
-                            for key in ['orientation', 'label_orientation']:
-                                if key in item:
-                                    val = item[key]
-                                    if isinstance(val, (int, float)):
-                                        if val <= 6.3:
-                                            return min(int(float(val) * 16 / 6.28), 15)
-                                        else:
-                                            return min(int(val) % 16, 15)
-                            if 'label' in item and isinstance(item['label'], (list, tuple)):
-                                return min(item['label'][3] % 16, 15)
-                            return 0
-                        label_fn = ori_label
+                # Columns: image, posX (0-31), posY (0-31), orientation (0-39),
+                #          shape (0-2), scale (0-5), color (0)
+                if task_name == 'dsprites_loc':
+                    def loc_label(item):
+                        return item['posX'] % 16  # bin 0-31 into 0-15
 
-                    img_key = 'image'
-                    for key in cols:
-                        if 'image' in key.lower() or 'img' in key.lower():
-                            img_key = key
-                            break
+                    return HFDatasetWrapper(ds, 'image', None, transform,
+                                            n_samples, label_fn=loc_label)
+                else:  # dsprites_ori
+                    def ori_label(item):
+                        return item['orientation'] % 16  # bin 0-39 into 0-15
 
-                    print(f"  Loaded dSprites ({hf_name}): {len(ds)} samples")
-                    return HFDatasetWrapper(ds, img_key, None, transform,
-                                            n_samples, label_fn=label_fn)
-                except Exception as e:
-                    print(f"  dSprites {hf_name} failed: {e}")
-                    continue
+                    return HFDatasetWrapper(ds, 'image', None, transform,
+                                            n_samples, label_fn=ori_label)
+            except Exception as e:
+                print(f"  dSprites load failed: {e}")
 
         if task_name == 'dmlab':
             try:

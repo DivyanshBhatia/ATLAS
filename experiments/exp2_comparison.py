@@ -278,15 +278,14 @@ def extract_attention_maps(model, dataloader, device, max_batches=5):
 # ============================================================================
 
 def run_comparison(config: ExperimentConfig):
-    """Run PEFT method comparison across multiple data scales.
+    """Run PEFT method comparison on all datasets at n=1000.
 
-    Validates:
-    - Theorem 1: VPT wins structured tasks, LoRA wins natural tasks
-    - Theorem 2: Accuracy vs capacity follows predicted rates
-    - Theorem 3: Optimal method changes with n
+    Tests Theorem 1: which method wins on which task?
+    Tests Theorem 2: how does accuracy scale with rank/prompts?
+    Cross-reference with Exp5 task structure metrics.
     """
     print("=" * 70)
-    print("EXPERIMENT 2: PEFT METHOD COMPARISON (multi-scale)")
+    print("EXPERIMENT 2: PEFT METHOD COMPARISON")
     print("=" * 70)
 
     device = setup_device()
@@ -299,241 +298,245 @@ def run_comparison(config: ExperimentConfig):
         print("Cannot download model. Using random init.")
         base_model = timm.create_model(config.model_name, pretrained=False, img_size=config.img_size)
 
-    pretrained_state = {k: v.cpu().clone() for k, v in base_model.state_dict().items()}
-
-    tasks_to_run = {
-        'natural': ['cifar100', 'dtd', 'svhn'],
-        'specialized': ['eurosat'],
-        'structured': ['gtsrb', 'clevr_count', 'dsprites_loc'],
-        # gtsrb: guaranteed via torchvision
-        # clevr_count, dsprites_loc: via HuggingFace (fallback to synthetic)
+    # All 20 datasets (matching exp5 task structure)
+    tasks = {
+        # Natural
+        'cifar10': (10, 'natural'), 'cifar100': (100, 'natural'),
+        'dtd': (47, 'natural'), 'oxford_flowers102': (102, 'natural'),
+        'oxford_iiit_pet': (37, 'natural'), 'food101': (101, 'natural'),
+        'stl10': (10, 'natural'), 'fgvc_aircraft': (100, 'natural'),
+        # Specialized
+        'eurosat': (10, 'specialized'), 'pcam': (2, 'specialized'),
+        'country211': (211, 'specialized'),
+        # Structured
+        'svhn': (10, 'structured'), 'gtsrb': (43, 'structured'),
+        'mnist': (10, 'structured'), 'fashionmnist': (10, 'structured'),
+        'kmnist': (10, 'structured'), 'emnist_letters': (26, 'structured'),
+        'rendered_sst2': (2, 'structured'),
+        'clevr_count': (8, 'structured'), 'dsprites_loc': (16, 'structured'),
     }
-    n_classes_map = {
-        'cifar100': 100, 'dtd': 47, 'svhn': 10, 'eurosat': 10,
-        'gtsrb': 43, 'clevr_count': 8, 'dsprites_loc': 16,
-    }
 
+    n_samples = config.n_train  # 1000 by default (VTAB-1K)
     all_results = {}
 
-    for category, task_list in tasks_to_run.items():
-        for task_name in task_list:
-            print(f"\n{'='*60}")
-            print(f"Task: {task_name} ({category})")
-            print(f"{'='*60}")
+    for task_name, (n_classes, category) in tasks.items():
+        print(f"\n{'='*60}")
+        print(f"Task: {task_name} ({category})")
+        print(f"{'='*60}")
 
-            n_classes = n_classes_map[task_name]
-            task_type = 'structured' if category == 'structured' else 'natural'
+        try:
+            # Load dataset
+            dataset = load_real_dataset(task_name, n_classes, config,
+                                        max_samples=n_samples)
+            if dataset is None:
+                print(f"  SKIPPED — no real dataset")
+                continue
 
-            # Load FULL dataset once
-            full_dataset = load_real_dataset(task_name, n_classes, config,
-                                             max_samples=0)
-            if full_dataset is None:
-                print(f"  Falling back to synthetic data")
-                full_dataset = SyntheticVTABDataset(5000, n_classes,
-                                                    config.img_size, task_type)
-            else:
-                print(f"  Loaded full dataset: {len(full_dataset)} samples")
+            print(f"  Loaded: {len(dataset)} samples")
 
-            task_results = {'category': category, 'scales': {}}
+            # Train/val split
+            from torch.utils.data import random_split
+            n_total = len(dataset)
+            n_val = min(200, n_total // 5)
+            n_train = n_total - n_val
+            train_ds, val_ds = random_split(dataset, [n_train, n_val])
 
-            for n_scale in config.n_train_scales:
-                n_use = len(full_dataset) if n_scale == 0 else min(n_scale, len(full_dataset))
-                n_val = min(config.n_val, n_use // 5)
-                n_train = n_use - n_val
+            train_loader = DataLoader(train_ds, batch_size=config.batch_size,
+                                      shuffle=True, num_workers=2)
+            val_loader = DataLoader(val_ds, batch_size=config.batch_size,
+                                    shuffle=False, num_workers=2)
 
-                print(f"\n  --- n_train = {n_train}, n_val = {n_val} ---")
+            print(f"  Split: {n_train} train / {n_val} val")
 
-                from torch.utils.data import random_split, Subset
-                if n_use < len(full_dataset):
-                    indices = torch.randperm(len(full_dataset))[:n_use].tolist()
-                    subset = Subset(full_dataset, indices)
-                else:
-                    subset = full_dataset
+            task_results = {'category': category, 'n_train': n_train, 'methods': {}}
 
-                train_ds, val_ds = random_split(subset, [n_train, n_val])
-                train_loader = DataLoader(train_ds, batch_size=config.batch_size,
-                                          shuffle=True, num_workers=2)
-                val_loader = DataLoader(val_ds, batch_size=config.batch_size,
-                                        shuffle=False, num_workers=2)
+            # --- LP ---
+            model = deepcopy(base_model).to(device)
+            model.head = nn.Linear(config.embed_dim, n_classes).to(device)
+            model = apply_linear_probe(model, config)
+            acc = train_and_evaluate(model, train_loader, val_loader, config,
+                                     device, 'LP')
+            task_results['methods']['LP'] = {'accuracy': acc}
+            del model
 
-                scale_results = {}
-
-                # LP
+            # --- LoRA (multiple ranks for rate curve) ---
+            for r in [1, 2, 4, 8, 16, 32]:
                 model = deepcopy(base_model).to(device)
                 model.head = nn.Linear(config.embed_dim, n_classes).to(device)
-                model = apply_linear_probe(model, config)
+                model = apply_lora(model, r, config)
                 acc = train_and_evaluate(model, train_loader, val_loader, config,
-                                         device, 'LP')
-                scale_results['LP'] = {'accuracy': acc}
+                                         device, f'LoRA(r={r})')
+                task_results['methods'][f'LoRA_r{r}'] = {'accuracy': acc, 'rank': r}
                 del model
 
-                # LoRA — expanded grid for rate curve fitting (Theorem 2b)
-                for r in [1, 2, 4, 8, 16, 32]:
-                    model = deepcopy(base_model).to(device)
-                    model.head = nn.Linear(config.embed_dim, n_classes).to(device)
-                    model = apply_lora(model, r, config)
-                    acc = train_and_evaluate(model, train_loader, val_loader, config,
-                                             device, f'LoRA(r={r})')
-                    scale_results[f'LoRA_r{r}'] = {'accuracy': acc, 'rank': r}
-                    del model
+            # --- VPT (multiple prompts to detect plateau) ---
+            for p in [1, 5, 10, 20, 50]:
+                model = deepcopy(base_model).to(device)
+                model.head = nn.Linear(config.embed_dim, n_classes).to(device)
+                model = apply_vpt(model, p, config)
+                acc = train_and_evaluate(model, train_loader, val_loader, config,
+                                         device, f'VPT(p={p})')
+                task_results['methods'][f'VPT_p{p}'] = {'accuracy': acc, 'n_prompts': p}
+                del model
 
-                # VPT — expanded grid to detect plateau (Theorem 2c)
-                for p in [1, 5, 10, 20, 50]:
-                    model = deepcopy(base_model).to(device)
-                    model.head = nn.Linear(config.embed_dim, n_classes).to(device)
-                    model = apply_vpt(model, p, config)
-                    acc = train_and_evaluate(model, train_loader, val_loader, config,
-                                             device, f'VPT(p={p})')
-                    scale_results[f'VPT_p{p}'] = {'accuracy': acc, 'n_prompts': p}
-                    del model
+            # --- Adapter ---
+            for r_a in [8, 32, 64]:
+                model = deepcopy(base_model).to(device)
+                model.head = nn.Linear(config.embed_dim, n_classes).to(device)
+                model = apply_adapter(model, r_a, config)
+                acc = train_and_evaluate(model, train_loader, val_loader, config,
+                                         device, f'Adapter(r_a={r_a})')
+                task_results['methods'][f'Adapter_r{r_a}'] = {'accuracy': acc, 'bottleneck': r_a}
+                del model
 
-                # Adapter
-                for r_a in [8, 32, 64]:
-                    model = deepcopy(base_model).to(device)
-                    model.head = nn.Linear(config.embed_dim, n_classes).to(device)
-                    model = apply_adapter(model, r_a, config)
-                    acc = train_and_evaluate(model, train_loader, val_loader, config,
-                                             device, f'Adapter(r_a={r_a})')
-                    scale_results[f'Adapter_r{r_a}'] = {'accuracy': acc, 'bottleneck': r_a}
-                    del model
-
-                task_results['scales'][str(n_train)] = scale_results
-                best = max(scale_results, key=lambda k: scale_results[k]['accuracy'])
-                print(f"  Best at n={n_train}: {best} ({scale_results[best]['accuracy']:.4f})")
-
-            # ==============================================================
-            # Task Characterization (run ONCE per task on full data)
-            # Measures S_attn, S_feat, sin²θ, α to correlate with winners
-            # ==============================================================
-            print(f"\n  [Task Characterization] FFT on full data...")
-            model_fft = deepcopy(base_model).to(device)
-            model_fft.head = nn.Linear(config.embed_dim, n_classes).to(device)
-
-            # Full dataset for FFT
-            from torch.utils.data import random_split as rs2
-            n_fft_total = len(full_dataset)
-            n_fft_val = min(config.n_val, n_fft_total // 5)
-            fft_train, fft_val = rs2(full_dataset, [n_fft_total - n_fft_val, n_fft_val])
-            fft_train_loader = DataLoader(fft_train, batch_size=config.batch_size,
-                                          shuffle=True, num_workers=2)
-            fft_val_loader = DataLoader(fft_val, batch_size=config.batch_size,
-                                        shuffle=False, num_workers=2)
-
-            # Get pretrained attention maps
-            pre_attn = extract_attention_maps(model_fft, fft_val_loader, device,
-                                              max_batches=3)
-
-            # Run FFT
-            for param in model_fft.parameters():
-                param.requires_grad_(True)
-            _ = train_and_evaluate(model_fft, fft_train_loader, fft_val_loader,
-                                   config, device, 'FFT', lr=config.lr_fft)
-
-            # Get fine-tuned attention maps
-            ft_attn = extract_attention_maps(model_fft, fft_val_loader, device,
-                                              max_batches=3)
-
-            # Compute S_attn
-            s_attn = 0.0
-            if pre_attn and ft_attn:
-                n_imgs = min(len(pre_attn), len(ft_attn))
-                s_attn_vals = []
-                for i in range(n_imgs):
-                    for l in pre_attn[i]:
-                        if l in ft_attn[i]:
-                            cls_diff = ft_attn[i][l][:, 0, 1:] - pre_attn[i][l][:, 0, 1:]
-                            s_attn_vals.append((cls_diff ** 2).mean().item())
-                s_attn = float(np.mean(s_attn_vals)) if s_attn_vals else 0.0
-
-            # Compute spectral profile and T(r)
-            fft_state = {k: v.cpu() for k, v in model_fft.state_dict().items()}
-            alphas = []
-            spectral_tails = {str(r): 0.0 for r in [1, 2, 4, 8, 16, 32]}
-            for name in pretrained_state:
-                if 'qkv.weight' in name or 'proj.weight' in name:
-                    delta = fft_state[name].float() - pretrained_state[name].float()
-                    sv = compute_svd_profile(delta)
-                    alpha_val, C_val = fit_spectral_decay(sv)
-                    alphas.append(alpha_val)
-                    for r in [1, 2, 4, 8, 16, 32]:
-                        spectral_tails[str(r)] += float((sv[r:] ** 2).sum())
-
-            task_results['task_descriptors'] = {
-                'S_attn': s_attn,
-                'mean_alpha': float(np.mean(alphas)) if alphas else 0.0,
-                'spectral_tails': spectral_tails,
-                'category': category,
-            }
-
-            print(f"  Task descriptors: S_attn={s_attn:.6f}, "
-                  f"α={task_results['task_descriptors']['mean_alpha']:.3f}")
-
-            del model_fft
+            # Print task summary
+            best = max(task_results['methods'],
+                      key=lambda k: task_results['methods'][k]['accuracy'])
+            best_acc = task_results['methods'][best]['accuracy']
+            print(f"\n  Task results (n={n_train}):")
+            for name, res in sorted(task_results['methods'].items(),
+                                    key=lambda x: -x[1]['accuracy']):
+                marker = " ←" if name == best else ""
+                print(f"    {name:15s}: {res['accuracy']:.4f}{marker}")
 
             all_results[task_name] = task_results
 
-    # Summary
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    # ========================================================================
+    # Summary Tables
+    # ========================================================================
     print("\n" + "=" * 70)
-    print("THEOREM 3 VALIDATION: Optimal Method vs. Data Scale")
+    print("RESULTS SUMMARY")
     print("=" * 70)
 
-    for task_name, res in all_results.items():
-        print(f"\n  {task_name} ({res['category']}):")
-        for n_str in sorted(res['scales'].keys(), key=lambda x: int(x)):
-            scale_res = res['scales'][n_str]
-            best = max(scale_res, key=lambda k: scale_res[k]['accuracy'])
-            acc = scale_res[best]['accuracy']
-            print(f"    n={int(n_str):>6d}: {best:15s} ({acc:.4f})")
-
-    print("\n  Expected: LP at small n → LoRA at moderate n → higher capacity at large n")
-
-    # ============================================================================
-    # Cross-experiment: Correlate task descriptors with method winners
-    # ============================================================================
-    print("\n" + "=" * 70)
-    print("THEOREM 1 VALIDATION: Task Descriptors vs. Method Winners")
-    print("=" * 70)
+    # Table 1: Best method per task
+    print(f"\n  {'Task':<18s} {'Cat':<12s} {'Best Method':<15s} {'Acc':>6s}  "
+          f"{'LP':>6s} {'LoRA4':>6s} {'LoRA16':>6s} {'VPT10':>6s} {'VPT50':>6s}")
+    print(f"  {'-'*95}")
 
     for task_name, res in all_results.items():
-        td = res.get('task_descriptors', {})
-        cat = res['category']
-        s_attn = td.get('S_attn', 0)
-        alpha = td.get('mean_alpha', 0)
+        m = res['methods']
+        best = max(m, key=lambda k: m[k]['accuracy'])
+        lp = m.get('LP', {}).get('accuracy', 0)
+        l4 = m.get('LoRA_r4', {}).get('accuracy', 0)
+        l16 = m.get('LoRA_r16', {}).get('accuracy', 0)
+        v10 = m.get('VPT_p10', {}).get('accuracy', 0)
+        v50 = m.get('VPT_p50', {}).get('accuracy', 0)
+        print(f"  {task_name:<18s} {res['category']:<12s} {best:<15s} "
+              f"{m[best]['accuracy']:>6.3f}  {lp:>6.3f} {l4:>6.3f} "
+              f"{l16:>6.3f} {v10:>6.3f} {v50:>6.3f}")
 
-        # Get best LoRA vs VPT at the largest scale
-        largest_scale = max(res['scales'].keys(), key=lambda x: int(x))
-        scale_res = res['scales'][largest_scale]
+    # Table 2: LoRA vs VPT winners
+    print(f"\n  THEOREM 1 VALIDATION: LoRA vs VPT")
+    print(f"  {'Task':<18s} {'Cat':<12s} {'Best LoRA':>10s} {'Best VPT':>10s} {'Winner':>8s}")
+    print(f"  {'-'*60}")
 
-        lora_best = max((v['accuracy'] for k, v in scale_res.items() if 'LoRA' in k), default=0)
-        vpt_best = max((v['accuracy'] for k, v in scale_res.items() if 'VPT' in k), default=0)
-        winner = "LoRA" if lora_best >= vpt_best else "VPT"
-
-        print(f"  {task_name:15s}: S_attn={s_attn:.6f}, α={alpha:.3f} → "
-              f"LoRA={lora_best:.3f} vs VPT={vpt_best:.3f} → {winner}")
-
-    print("\n  Theory predicts: high S_attn → VPT wins; high α → LoRA needs low rank")
-
-    # ============================================================================
-    # Cross-experiment: T(r) vs LoRA accuracy (Theorem 2b validation)
-    # ============================================================================
-    print("\n" + "=" * 70)
-    print("THEOREM 2 VALIDATION: Spectral Tail T(r) vs. LoRA Accuracy")
-    print("=" * 70)
-
+    lora_wins, vpt_wins, ties = 0, 0, 0
     for task_name, res in all_results.items():
-        td = res.get('task_descriptors', {})
-        tails = td.get('spectral_tails', {})
-        largest_scale = max(res['scales'].keys(), key=lambda x: int(x))
-        scale_res = res['scales'][largest_scale]
+        m = res['methods']
+        best_lora = max((m[k]['accuracy'] for k in m if 'LoRA' in k), default=0)
+        best_vpt = max((m[k]['accuracy'] for k in m if 'VPT' in k), default=0)
+        if best_lora > best_vpt + 0.01:
+            winner = "LoRA"
+            lora_wins += 1
+        elif best_vpt > best_lora + 0.01:
+            winner = "VPT"
+            vpt_wins += 1
+        else:
+            winner = "TIE"
+            ties += 1
+        print(f"  {task_name:<18s} {res['category']:<12s} "
+              f"{best_lora:>10.3f} {best_vpt:>10.3f} {winner:>8s}")
 
-        print(f"\n  {task_name} (α={td.get('mean_alpha', 0):.3f}):")
-        print(f"    {'Rank':>6s}  {'T(r)':>12s}  {'LoRA Acc':>10s}  {'1-Acc':>10s}")
-        for r in [1, 2, 4, 8, 16, 32]:
-            tail = tails.get(str(r), 0)
-            acc = scale_res.get(f'LoRA_r{r}', {}).get('accuracy', 0)
-            print(f"    {r:>6d}  {tail:>12.2f}  {acc:>10.4f}  {1-acc:>10.4f}")
+    print(f"\n  LoRA wins: {lora_wins}, VPT wins: {vpt_wins}, Ties: {ties}")
 
-    print("\n  Theory predicts: (1 - accuracy) ∝ T(r) ∝ r^{1-2α}")
+    # ========================================================================
+    # Cross-reference with Exp5 task structure predictions
+    # ========================================================================
+    exp5_path = os.path.join(config.output_dir, 'task_structure_analysis.json')
+    if os.path.exists(exp5_path):
+        print("\n" + "=" * 70)
+        print("CROSS-VALIDATION: Exp5 Predictions vs Exp2 Actual Results")
+        print("=" * 70)
+
+        with open(exp5_path) as f:
+            exp5_data = json.load(f)
+
+        correct, total = 0, 0
+        print(f"\n  {'Task':<18s} {'Gap':>5s} {'AtnV':>6s} {'Exp5 Prediction':<30s} "
+              f"{'Exp2 Winner':<15s} {'Match':>5s}")
+        print(f"  {'-'*85}")
+
+        for task_name, res in all_results.items():
+            if task_name not in exp5_data:
+                continue
+
+            e5 = exp5_data[task_name]
+            gap = e5.get('feature_gap', 0)
+            attn_var = e5.get('attention_class_variance_ratio', 0)
+
+            # Exp5 prediction logic
+            if gap < 0.10:
+                prediction = "LP"
+            elif attn_var > 0.3 and gap > 0.2:
+                prediction = "VPT"
+            elif attn_var > 0.2:
+                prediction = "VPT or LoRA"
+            else:
+                prediction = "LoRA"
+
+            # Exp2 actual winner
+            m = res['methods']
+            best_lp = m.get('LP', {}).get('accuracy', 0)
+            best_lora = max((m[k]['accuracy'] for k in m if 'LoRA' in k), default=0)
+            best_vpt = max((m[k]['accuracy'] for k in m if 'VPT' in k), default=0)
+            best_adapter = max((m[k]['accuracy'] for k in m if 'Adapter' in k), default=0)
+
+            all_best = max(best_lp, best_lora, best_vpt, best_adapter)
+            if best_lp >= all_best - 0.01:
+                actual = "LP"
+            elif best_vpt >= best_lora + 0.01:
+                actual = "VPT"
+            elif best_lora >= best_vpt + 0.01:
+                actual = "LoRA"
+            else:
+                actual = "TIE(LoRA/VPT)"
+
+            # Check match
+            match = False
+            if prediction == "LP" and actual == "LP":
+                match = True
+            elif prediction == "LoRA" and actual in ("LoRA", "TIE(LoRA/VPT)"):
+                match = True
+            elif prediction == "VPT" and actual in ("VPT", "TIE(LoRA/VPT)"):
+                match = True
+            elif prediction == "VPT or LoRA":
+                match = actual in ("VPT", "LoRA", "TIE(LoRA/VPT)")
+
+            if match:
+                correct += 1
+            total += 1
+
+            symbol = "✓" if match else "✗"
+            print(f"  {task_name:<18s} {gap:>5.2f} {attn_var:>6.3f} "
+                  f"{prediction:<30s} {actual:<15s} {symbol:>5s}")
+
+        if total > 0:
+            acc = correct / total
+            print(f"\n  Prediction accuracy: {correct}/{total} = {acc:.1%}")
+            if acc >= 0.7:
+                print(f"  THEORY VALIDATED — training-free metrics predict PEFT winner")
+            elif acc >= 0.5:
+                print(f"  PARTIAL VALIDATION — metrics have predictive power but need refinement")
+            else:
+                print(f"  THEORY NEEDS REVISION — metrics don't predict PEFT winner")
+    else:
+        print(f"\n  Run exp5 (task_structure) first to enable cross-validation.")
 
     save_results(all_results, 'experiment2_comparison.json', config)
     return all_results
