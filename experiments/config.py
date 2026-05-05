@@ -42,18 +42,21 @@ class ExperimentConfig:
     img_size: int = 224           # 224 not 518: 16x16=256 patches vs 37x37=1369
     num_patches: int = 256        # (224/14)^2 = 16^2
 
-    # VTAB-1K tasks (grouped by category)
+    # VTAB-1K tasks + additional tasks (grouped by category)
     vtab_natural: List[str] = field(default_factory=lambda: [
-        "cifar100", "caltech101", "dtd", "oxford_flowers102",
-        "oxford_iiit_pet", "svhn", "sun397",
+        "cifar10", "cifar100", "caltech101", "dtd", "oxford_flowers102",
+        "oxford_iiit_pet", "svhn", "sun397", "food101", "stl10",
+        "stanford_cars", "fgvc_aircraft",
     ])
     vtab_specialized: List[str] = field(default_factory=lambda: [
         "patch_camelyon", "eurosat", "resisc45", "diabetic_retinopathy",
+        "pcam", "country211",
     ])
     vtab_structured: List[str] = field(default_factory=lambda: [
         "clevr_count", "clevr_dist", "dmlab", "kitti",
         "dsprites_loc", "dsprites_ori", "smallnorb_azi", "smallnorb_ele",
-        "gtsrb",  # German Traffic Signs — available via torchvision
+        "gtsrb", "mnist", "fashionmnist", "kmnist", "emnist_letters",
+        "rendered_sst2",
     ])
 
     # PEFT configurations

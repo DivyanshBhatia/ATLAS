@@ -294,13 +294,32 @@ def run_task_structure_analysis(config: ExperimentConfig):
     model = model.to(device)
 
     tasks = {
-        'cifar100':     (100, 'natural'),
-        'dtd':          (47,  'natural'),
-        'svhn':         (10,  'natural'),
-        'eurosat':      (10,  'specialized'),
-        'gtsrb':        (43,  'structured'),
-        'clevr_count':  (8,   'structured'),
-        'dsprites_loc': (16,  'structured'),
+        # --- Natural / Fine-Grained (expect: high LP acc, low attn var → LoRA) ---
+        'cifar10':          (10,  'natural'),
+        'cifar100':         (100, 'natural'),
+        'dtd':              (47,  'natural'),
+        'oxford_flowers102':(102, 'natural'),
+        'oxford_iiit_pet':  (37,  'natural'),
+        'food101':          (101, 'natural'),
+        'stl10':            (10,  'natural'),
+        'stanford_cars':    (196, 'natural'),
+        'fgvc_aircraft':    (100, 'natural'),
+
+        # --- Specialized (expect: varies) ---
+        'eurosat':          (10,  'specialized'),
+        'pcam':             (2,   'specialized'),
+        'country211':       (211, 'specialized'),
+
+        # --- Structured / Spatial (expect: low LP acc, high attn var → VPT) ---
+        'svhn':             (10,  'structured'),
+        'gtsrb':            (43,  'structured'),
+        'mnist':            (10,  'structured'),
+        'fashionmnist':     (10,  'structured'),
+        'kmnist':           (10,  'structured'),
+        'emnist_letters':   (26,  'structured'),
+        'rendered_sst2':    (2,   'structured'),
+        'clevr_count':      (8,   'structured'),
+        'dsprites_loc':     (16,  'structured'),
     }
 
     all_results = {}
@@ -310,81 +329,83 @@ def run_task_structure_analysis(config: ExperimentConfig):
         print(f"Task: {task_name} ({category})")
         print(f"{'='*55}")
 
-        # Load data (1000 samples is plenty for feature extraction)
-        dataset = load_real_dataset(task_name, n_classes, config,
-                                    max_samples=1000)
-        if dataset is None:
-            task_type = 'structured' if category == 'structured' else 'natural'
-            dataset = SyntheticVTABDataset(1000, n_classes,
-                                           config.img_size, task_type)
-            print(f"  Using synthetic data")
-        else:
+        try:
+            # Load data (1000 samples is plenty for feature extraction)
+            dataset = load_real_dataset(task_name, n_classes, config,
+                                        max_samples=1000)
+            if dataset is None:
+                print(f"  SKIPPED — no real dataset available")
+                continue
+
             print(f"  Loaded: {len(dataset)} samples")
 
-        loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=2)
+            loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=2)
 
-        # --- Extract features and attention ---
-        print("  Extracting features and attention maps...")
-        features, labels, attention = extract_features_and_attention(
-            model, loader, device, max_batches=20)
-        print(f"  Extracted: {features.shape[0]} samples, {features.shape[1]}d features")
+            # --- Extract features and attention ---
+            print("  Extracting features and attention maps...")
+            features, labels, attention = extract_features_and_attention(
+                model, loader, device, max_batches=20)
+            print(f"  Extracted: {features.shape[0]} samples, {features.shape[1]}d features")
 
-        # --- Metric 1: Linear Probe Accuracy ---
-        lp_acc = measure_linear_probe_accuracy(features, labels, n_classes)
-        print(f"  Linear probe accuracy:    {lp_acc:.4f}")
+            # --- Metric 1: Linear Probe Accuracy ---
+            lp_acc = measure_linear_probe_accuracy(features, labels, n_classes)
+            print(f"  Linear probe accuracy:    {lp_acc:.4f}")
 
-        # --- Metric 2: k-NN Accuracy ---
-        knn_acc = measure_knn_accuracy(features, labels, k=5)
-        print(f"  5-NN accuracy:            {knn_acc:.4f}")
+            # --- Metric 2: k-NN Accuracy ---
+            knn_acc = measure_knn_accuracy(features, labels, k=5)
+            print(f"  5-NN accuracy:            {knn_acc:.4f}")
 
-        # --- Metric 3: Attention Entropy ---
-        mean_ent, max_ent, norm_ent = measure_attention_entropy(
-            attention, config.num_layers)
-        print(f"  Attention entropy:        {mean_ent:.4f} / {max_ent:.4f} "
-              f"(normalized: {norm_ent:.4f})")
+            # --- Metric 3: Attention Entropy ---
+            mean_ent, max_ent, norm_ent = measure_attention_entropy(
+                attention, config.num_layers)
+            print(f"  Attention entropy:        {mean_ent:.4f} / {max_ent:.4f} "
+                  f"(normalized: {norm_ent:.4f})")
 
-        # --- Metric 4: Attention Class Variance ---
-        between_var, within_var, attn_ratio = measure_attention_class_variance(
-            attention, labels, config.num_layers)
-        print(f"  Attention class variance: between={between_var:.6f}, "
-              f"within={within_var:.6f}, ratio={attn_ratio:.4f}")
+            # --- Metric 4: Attention Class Variance ---
+            between_var, within_var, attn_ratio = measure_attention_class_variance(
+                attention, labels, config.num_layers)
+            print(f"  Attention class variance: between={between_var:.6f}, "
+                  f"within={within_var:.6f}, ratio={attn_ratio:.4f}")
 
-        # --- Metric 5: Gradient Rank ---
-        print("  Computing gradient rank...")
-        eff_rank, top4_frac = measure_gradient_rank(
-            model, loader, device, n_classes, max_batches=3)
-        print(f"  Gradient effective rank:  {eff_rank:.1f}")
-        print(f"  Gradient top-4 fraction:  {top4_frac:.4f}")
+            # --- Metric 5: Gradient Rank ---
+            print("  Computing gradient rank...")
+            eff_rank, top4_frac = measure_gradient_rank(
+                model, loader, device, n_classes, max_batches=3)
+            print(f"  Gradient effective rank:  {eff_rank:.1f}")
+            print(f"  Gradient top-4 fraction:  {top4_frac:.4f}")
 
-        # --- Derived predictions ---
-        # Feature gap = 1 - LP accuracy (how much the task needs beyond pretrained features)
-        feature_gap = 1.0 - lp_acc
+            # --- Derived predictions ---
+            feature_gap = 1.0 - lp_acc
 
-        # Predicted best method based on our metrics
-        if feature_gap < 0.1:
-            predicted = "LP (features already sufficient)"
-        elif attn_ratio > 0.5 and feature_gap > 0.3:
-            predicted = "VPT (attention-steering task)"
-        elif top4_frac > 0.8:
-            predicted = "LoRA low-rank (gradient is low-rank)"
-        else:
-            predicted = "LoRA or Adapter (feature adaptation needed)"
+            if feature_gap < 0.1:
+                predicted = "LP (features already sufficient)"
+            elif attn_ratio > 0.5 and feature_gap > 0.3:
+                predicted = "VPT (attention-steering task)"
+            elif top4_frac > 0.8:
+                predicted = "LoRA low-rank (gradient is low-rank)"
+            else:
+                predicted = "LoRA or Adapter (feature adaptation needed)"
 
-        print(f"\n  Feature gap (1-LP_acc):   {feature_gap:.4f}")
-        print(f"  Predicted best method:    {predicted}")
+            print(f"\n  Feature gap (1-LP_acc):   {feature_gap:.4f}")
+            print(f"  Predicted best method:    {predicted}")
 
-        all_results[task_name] = {
-            'category': category,
-            'n_classes': n_classes,
-            'linear_probe_accuracy': lp_acc,
-            'knn_accuracy': knn_acc,
-            'attention_entropy_normalized': norm_ent,
-            'attention_class_variance_ratio': attn_ratio,
-            'gradient_effective_rank': eff_rank,
-            'gradient_top4_fraction': top4_frac,
-            'feature_gap': feature_gap,
-            'predicted_method': predicted,
-        }
+            all_results[task_name] = {
+                'category': category,
+                'n_classes': n_classes,
+                'linear_probe_accuracy': lp_acc,
+                'knn_accuracy': knn_acc,
+                'attention_entropy_normalized': norm_ent,
+                'attention_class_variance_ratio': attn_ratio,
+                'gradient_effective_rank': eff_rank,
+                'gradient_top4_fraction': top4_frac,
+                'feature_gap': feature_gap,
+                'predicted_method': predicted,
+            }
+
+        except Exception as e:
+            print(f"  ERROR on {task_name}: {e}")
+            print(f"  Skipping this task.")
+            continue
 
     # ====================================================================
     # Summary

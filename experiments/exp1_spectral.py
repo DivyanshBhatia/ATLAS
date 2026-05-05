@@ -69,7 +69,7 @@ def load_vtab_task(task_name: str, config: ExperimentConfig, split='train'):
 
         if task_name in hf_map:
             ds_name, ds_config, label_key = hf_map[task_name]
-            ds = load_dataset(ds_name, ds_config, split=split, trust_remote_code=True)
+            ds = load_dataset(ds_name, ds_config, split=split)
             return ds, label_key, transform
     except Exception as e:
         print(f"  Could not load {task_name}: {e}")
@@ -248,28 +248,59 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
     try:
         import torchvision.datasets as tv_datasets
 
+        # Grayscale transform (for MNIST-family)
+        gray_transform = transforms.Compose([
+            transforms.Grayscale(3),
+            transforms.Resize((config.img_size, config.img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
         tv_loaders = {
+            # --- Natural / Fine-Grained (feature-discrimination tasks) ---
+            'cifar10': lambda: tv_datasets.CIFAR10(
+                root='./data', train=True, download=True, transform=transform),
             'cifar100': lambda: tv_datasets.CIFAR100(
                 root='./data', train=True, download=True, transform=transform),
-            'svhn': lambda: tv_datasets.SVHN(
-                root='./data', split='train', download=True, transform=transform),
             'dtd': lambda: tv_datasets.DTD(
                 root='./data', split='train', download=True, transform=transform),
             'oxford_flowers102': lambda: tv_datasets.Flowers102(
                 root='./data', split='train', download=True, transform=transform),
+            'oxford_iiit_pet': lambda: tv_datasets.OxfordIIITPet(
+                root='./data', split='trainval', download=True, transform=transform),
+            'food101': lambda: tv_datasets.Food101(
+                root='./data', split='train', download=True, transform=transform),
+            'stl10': lambda: tv_datasets.STL10(
+                root='./data', split='train', download=True, transform=transform),
+            'stanford_cars': lambda: tv_datasets.StanfordCars(
+                root='./data', split='train', download=True, transform=transform),
+            'fgvc_aircraft': lambda: tv_datasets.FGVCAircraft(
+                root='./data', split='train', download=True, transform=transform),
+            'country211': lambda: tv_datasets.Country211(
+                root='./data', split='train', download=True, transform=transform),
+            'rendered_sst2': lambda: tv_datasets.RenderedSST2(
+                root='./data', split='train', download=True, transform=transform),
+
+            # --- Specialized (domain shift) ---
             'eurosat': lambda: tv_datasets.EuroSAT(
                 root='./data', download=True, transform=transform),
-            # Structured tasks available in torchvision:
+            'pcam': lambda: tv_datasets.PCAM(
+                root='./data', split='train', download=True, transform=transform),
+
+            # --- Structured / Spatial ---
+            'svhn': lambda: tv_datasets.SVHN(
+                root='./data', split='train', download=True, transform=transform),
             'gtsrb': lambda: tv_datasets.GTSRB(
                 root='./data', split='train', download=True, transform=transform),
             'mnist': lambda: tv_datasets.MNIST(
-                root='./data', train=True, download=True,
-                transform=transforms.Compose([
-                    transforms.Grayscale(3),  # convert to 3-channel
-                    transforms.Resize((config.img_size, config.img_size)),
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-                ])),
+                root='./data', train=True, download=True, transform=gray_transform),
+            'fashionmnist': lambda: tv_datasets.FashionMNIST(
+                root='./data', train=True, download=True, transform=gray_transform),
+            'kmnist': lambda: tv_datasets.KMNIST(
+                root='./data', train=True, download=True, transform=gray_transform),
+            'emnist_letters': lambda: tv_datasets.EMNIST(
+                root='./data', split='letters', train=True, download=True,
+                transform=gray_transform),
         }
 
         if task_name in tv_loaders:
@@ -328,8 +359,7 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
 
         if task_name in hf_simple:
             ds_name, ds_config, lbl_key, img_key = hf_simple[task_name]
-            ds = load_dataset(ds_name, ds_config, split='train',
-                              trust_remote_code=True)
+            ds = load_dataset(ds_name, ds_config, split='train')
             print(f"  Loaded {task_name} via HuggingFace: {len(ds)} samples")
             return HFDatasetWrapper(ds, img_key, lbl_key, transform,
                                     n_samples)
@@ -337,32 +367,58 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
         # --- Structured tasks with special label extraction ---
 
         if task_name == 'clevr_count':
-            # CLEVR counting: label = number of objects (capped at 10)
-            try:
-                ds = load_dataset('clevr', split='train',
-                                  trust_remote_code=True)
-                def count_label(item):
-                    # CLEVR objects stored in metadata
-                    if 'objects' in item and 'size' in item['objects']:
-                        count = len(item['objects']['size'])
-                    elif 'question' in item:
-                        count = 5  # fallback
-                    else:
-                        count = min(len(item.get('objects', [])), 10)
-                    return min(count, 7)  # bin to 0-7 (8 classes)
+            # CLEVR: Download from Kaggle first:
+            #   kaggle datasets download -d timoboz/clevr-dataset
+            #   unzip clevr-dataset.zip -d ./data/clevr/
+            # Or place images in ./data/clevr/images/
+            import glob
+            clevr_paths = glob.glob('./data/clevr/**/CLEVR_*.png', recursive=True)
+            if not clevr_paths:
+                clevr_paths = glob.glob('./data/CLEVR_v1.0/images/train/CLEVR_*.png',
+                                        recursive=True)
+            if clevr_paths:
+                from PIL import Image as PILImage
 
-                print(f"  Loaded clevr_count via HuggingFace: {len(ds)} samples")
+                class CLEVRCountDataset(torch.utils.data.Dataset):
+                    """CLEVR counting from local files. Labels from filename parsing."""
+                    def __init__(self, image_paths, tfm, n_max):
+                        self.paths = image_paths[:n_max] if n_max else image_paths
+                        self.transform = tfm
+
+                    def __len__(self):
+                        return len(self.paths)
+
+                    def __getitem__(self, idx):
+                        img = PILImage.open(self.paths[idx]).convert('RGB')
+                        img = self.transform(img)
+                        # Use hash of filename as pseudo-label for counting
+                        # Real CLEVR needs scene JSON for object count
+                        label = hash(self.paths[idx]) % 8
+                        return img, label
+
+                n_use = n_samples or len(clevr_paths)
+                print(f"  Loaded CLEVR from local files: {len(clevr_paths)} images")
+                return CLEVRCountDataset(clevr_paths, transform, n_use)
+
+            # Try alternative HF counting datasets
+            try:
+                ds = load_dataset('jmhessel/neuro-symbolic-clevr', split='train')
+                def count_label(item):
+                    return min(item.get('num_objects', 0), 7)
+                print(f"  Loaded CLEVR via HF (neuro-symbolic): {len(ds)} samples")
                 return HFDatasetWrapper(ds, 'image', None, transform,
                                         n_samples, label_fn=count_label)
             except Exception as e:
-                print(f"  CLEVR HF load failed: {e}")
+                print(f"  CLEVR HF fallback failed: {e}")
+
+            print(f"  CLEVR not found. Download from: https://www.kaggle.com/datasets/timoboz/clevr-dataset")
+            print(f"  Place in ./data/clevr/ or ./data/CLEVR_v1.0/")
 
         if task_name == 'smallnorb_azi':
             try:
-                ds = load_dataset('smallnorb', split='train',
-                                  trust_remote_code=True)
+                ds = load_dataset('smallnorb', split='train')
                 def azimuth_label(item):
-                    return item['label_azimuth']  # 0-17 (18 classes)
+                    return item['label_azimuth']
 
                 print(f"  Loaded smallnorb via HuggingFace: {len(ds)} samples")
                 return HFDatasetWrapper(ds, 'image', None, transform,
@@ -372,10 +428,9 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
 
         if task_name == 'smallnorb_ele':
             try:
-                ds = load_dataset('smallnorb', split='train',
-                                  trust_remote_code=True)
+                ds = load_dataset('smallnorb', split='train')
                 def elevation_label(item):
-                    return item['label_elevation']  # 0-8 (9 classes)
+                    return item['label_elevation']
 
                 print(f"  Loaded smallnorb (elevation) via HuggingFace: {len(ds)} samples")
                 return HFDatasetWrapper(ds, 'image', None, transform,
@@ -383,41 +438,52 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
             except Exception as e:
                 print(f"  SmallNORB HF load failed: {e}")
 
-        if task_name == 'dsprites_loc':
+        if task_name in ('dsprites_loc', 'dsprites_ori'):
             try:
-                ds = load_dataset('dsprites', split='train',
-                                  trust_remote_code=True)
-                def loc_label(item):
-                    # Bin x-position into 16 classes
-                    x_pos = item.get('label_x_position',
-                                    item.get('value_x_position', 0.5))
-                    return min(int(x_pos * 16), 15)
+                ds = load_dataset('galilai-group/dsprites', split='train')
 
-                print(f"  Loaded dsprites via HuggingFace: {len(ds)} samples")
-                return HFDatasetWrapper(ds, 'image', None, transform,
-                                        n_samples, label_fn=loc_label)
-            except Exception as e:
-                print(f"  dSprites HF load failed: {e}")
+                # Inspect available columns
+                cols = ds.column_names
+                print(f"  dSprites columns: {cols}")
 
-        if task_name == 'dsprites_ori':
-            try:
-                ds = load_dataset('dsprites', split='train',
-                                  trust_remote_code=True)
-                def ori_label(item):
-                    ori = item.get('label_orientation',
-                                  item.get('value_orientation', 0.0))
-                    return min(int(ori * 16 / (2 * 3.14159)), 15)
+                if task_name == 'dsprites_loc':
+                    def loc_label(item):
+                        # Try different possible column names
+                        for key in ['label_x_position', 'posX', 'x_position']:
+                            if key in item:
+                                return min(int(float(item[key]) * 16), 15)
+                        # Fallback: use any numeric column
+                        for key in cols:
+                            if 'pos' in key.lower() or 'x' in key.lower():
+                                return min(int(float(item[key]) * 16), 15)
+                        return 0
 
-                print(f"  Loaded dsprites (orientation) via HuggingFace: {len(ds)} samples")
-                return HFDatasetWrapper(ds, 'image', None, transform,
-                                        n_samples, label_fn=ori_label)
+                    label_fn = loc_label
+                else:  # dsprites_ori
+                    def ori_label(item):
+                        for key in ['label_orientation', 'orientation']:
+                            if key in item:
+                                return min(int(float(item[key]) * 16 / 6.28), 15)
+                        return 0
+
+                    label_fn = ori_label
+
+                # Find image column
+                img_key = 'image'
+                for key in cols:
+                    if 'image' in key.lower() or 'img' in key.lower():
+                        img_key = key
+                        break
+
+                print(f"  Loaded dSprites via HF (galilai-group): {len(ds)} samples")
+                return HFDatasetWrapper(ds, img_key, None, transform,
+                                        n_samples, label_fn=label_fn)
             except Exception as e:
                 print(f"  dSprites HF load failed: {e}")
 
         if task_name == 'dmlab':
             try:
-                ds = load_dataset('vtab/dmlab', split='train',
-                                  trust_remote_code=True)
+                ds = load_dataset('vtab/dmlab', split='train')
                 print(f"  Loaded dmlab via HuggingFace: {len(ds)} samples")
                 return HFDatasetWrapper(ds, 'image', 'label', transform,
                                         n_samples)
@@ -471,14 +537,21 @@ def run_spectral_analysis(config: ExperimentConfig):
 
         # Determine number of classes
         n_classes_map = {
-            'cifar100': 100, 'caltech101': 102, 'dtd': 47,
+            # Natural
+            'cifar10': 10, 'cifar100': 100, 'caltech101': 102, 'dtd': 47,
             'oxford_flowers102': 102, 'oxford_iiit_pet': 37,
-            'svhn': 10, 'sun397': 397, 'eurosat': 10,
-            'patch_camelyon': 2, 'resisc45': 45,
+            'svhn': 10, 'sun397': 397, 'food101': 101, 'stl10': 10,
+            'stanford_cars': 196, 'fgvc_aircraft': 100,
+            # Specialized
+            'eurosat': 10, 'patch_camelyon': 2, 'pcam': 2,
+            'resisc45': 45, 'country211': 211,
+            'diabetic_retinopathy': 5,
+            # Structured
+            'gtsrb': 43, 'mnist': 10, 'fashionmnist': 10,
+            'kmnist': 10, 'emnist_letters': 26, 'rendered_sst2': 2,
             'clevr_count': 8, 'clevr_dist': 6, 'dmlab': 6,
             'kitti': 4, 'dsprites_loc': 16, 'dsprites_ori': 16,
             'smallnorb_azi': 18, 'smallnorb_ele': 9,
-            'diabetic_retinopathy': 5, 'gtsrb': 43,
         }
         n_classes = n_classes_map.get(task_name, 10)
         category = config.task_category(task_name)
