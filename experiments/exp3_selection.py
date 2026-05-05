@@ -63,7 +63,7 @@ class SelectionAlgorithm:
         model.train()
         for epoch in range(self.config.pilot_epochs):
             for batch_x, batch_y in train_loader:
-                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
                 optimizer.zero_grad()
                 loss = criterion(model(batch_x), batch_y)
                 loss.backward()

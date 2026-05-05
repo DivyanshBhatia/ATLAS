@@ -202,7 +202,7 @@ def train_and_evaluate(model, train_loader, val_loader, config, device,
     for epoch in range(epochs):
         model.train()
         for batch_x, batch_y in train_loader:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
             optimizer.zero_grad()
             logits = model(batch_x)
             loss = criterion(logits, batch_y)
@@ -214,7 +214,7 @@ def train_and_evaluate(model, train_loader, val_loader, config, device,
         correct, total_samples = 0, 0
         with torch.no_grad():
             for batch_x, batch_y in val_loader:
-                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
                 logits = model(batch_x)
                 preds = logits.argmax(dim=-1)
                 correct += (preds == batch_y).sum().item()

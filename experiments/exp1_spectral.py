@@ -144,7 +144,7 @@ def full_finetune(model, train_loader, n_classes, config, device,
         model.train()
         total_loss = 0
         for batch_x, batch_y in train_loader:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
             optimizer.zero_grad()
             logits = model(batch_x)
             loss = criterion(logits, batch_y)
@@ -163,7 +163,7 @@ def full_finetune(model, train_loader, n_classes, config, device,
             val_total, val_count = 0, 0
             with torch.no_grad():
                 for batch_x, batch_y in val_loader:
-                    batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                    batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
                     val_total += criterion(model(batch_x), batch_y).item() * batch_y.shape[0]
                     val_count += batch_y.shape[0]
             val_loss = val_total / max(val_count, 1)
@@ -355,6 +355,8 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
             'resisc45': ('timm/resisc45', None, 'label', 'image'),
             'sun397': ('tanganke/sun397', None, 'label', 'image'),
             'oxford_iiit_pet': ('timm/oxford-iiit-pet', None, 'label', 'image'),
+            # Datasets with broken torchvision downloads:
+            'stanford_cars': ('tanganke/stanford_cars', None, 'label', 'image'),
         }
 
         if task_name in hf_simple:
@@ -439,47 +441,57 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
                 print(f"  SmallNORB HF load failed: {e}")
 
         if task_name in ('dsprites_loc', 'dsprites_ori'):
-            try:
-                ds = load_dataset('galilai-group/dsprites', split='train')
+            # Try multiple HF sources
+            for hf_name in ['randall-lab/dsprites', 'dpdl-benchmark/dsprites',
+                            'galilai-group/dsprites']:
+                try:
+                    ds = load_dataset(hf_name, split='train')
+                    cols = ds.column_names
+                    print(f"  dSprites columns ({hf_name}): {cols}")
 
-                # Inspect available columns
-                cols = ds.column_names
-                print(f"  dSprites columns: {cols}")
+                    if task_name == 'dsprites_loc':
+                        def loc_label(item):
+                            # randall-lab format: posX is direct column
+                            for key in ['posX', 'label_x_position', 'x_position']:
+                                if key in item:
+                                    val = item[key]
+                                    if isinstance(val, (int, float)):
+                                        if val <= 1.0:
+                                            return min(int(float(val) * 16), 15)
+                                        else:
+                                            return min(int(val), 15)
+                            # Try label list (randall-lab: label=[color,shape,scale,ori,posX,posY])
+                            if 'label' in item and isinstance(item['label'], (list, tuple)):
+                                return min(item['label'][4] % 16, 15)
+                            return 0
+                        label_fn = loc_label
+                    else:
+                        def ori_label(item):
+                            for key in ['orientation', 'label_orientation']:
+                                if key in item:
+                                    val = item[key]
+                                    if isinstance(val, (int, float)):
+                                        if val <= 6.3:
+                                            return min(int(float(val) * 16 / 6.28), 15)
+                                        else:
+                                            return min(int(val) % 16, 15)
+                            if 'label' in item and isinstance(item['label'], (list, tuple)):
+                                return min(item['label'][3] % 16, 15)
+                            return 0
+                        label_fn = ori_label
 
-                if task_name == 'dsprites_loc':
-                    def loc_label(item):
-                        # Try different possible column names
-                        for key in ['label_x_position', 'posX', 'x_position']:
-                            if key in item:
-                                return min(int(float(item[key]) * 16), 15)
-                        # Fallback: use any numeric column
-                        for key in cols:
-                            if 'pos' in key.lower() or 'x' in key.lower():
-                                return min(int(float(item[key]) * 16), 15)
-                        return 0
+                    img_key = 'image'
+                    for key in cols:
+                        if 'image' in key.lower() or 'img' in key.lower():
+                            img_key = key
+                            break
 
-                    label_fn = loc_label
-                else:  # dsprites_ori
-                    def ori_label(item):
-                        for key in ['label_orientation', 'orientation']:
-                            if key in item:
-                                return min(int(float(item[key]) * 16 / 6.28), 15)
-                        return 0
-
-                    label_fn = ori_label
-
-                # Find image column
-                img_key = 'image'
-                for key in cols:
-                    if 'image' in key.lower() or 'img' in key.lower():
-                        img_key = key
-                        break
-
-                print(f"  Loaded dSprites via HF (galilai-group): {len(ds)} samples")
-                return HFDatasetWrapper(ds, img_key, None, transform,
-                                        n_samples, label_fn=label_fn)
-            except Exception as e:
-                print(f"  dSprites HF load failed: {e}")
+                    print(f"  Loaded dSprites ({hf_name}): {len(ds)} samples")
+                    return HFDatasetWrapper(ds, img_key, None, transform,
+                                            n_samples, label_fn=label_fn)
+                except Exception as e:
+                    print(f"  dSprites {hf_name} failed: {e}")
+                    continue
 
         if task_name == 'dmlab':
             try:
@@ -522,9 +534,17 @@ def run_spectral_analysis(config: ExperimentConfig):
     results = {}
     all_alphas = {'natural': [], 'specialized': [], 'structured': []}
 
-    # Select representative tasks (one per subcategory for speed)
-    tasks_to_run = ['cifar100', 'dtd', 'svhn', 'eurosat', 'patch_camelyon',
-                    'gtsrb', 'clevr_count', 'dsprites_loc', 'smallnorb_azi']
+    # Run ALL datasets (matching exp5 task structure analysis)
+    tasks_to_run = [
+        # Natural
+        'cifar10', 'cifar100', 'dtd', 'oxford_flowers102', 'oxford_iiit_pet',
+        'food101', 'stl10', 'fgvc_aircraft',
+        # Specialized
+        'eurosat', 'pcam', 'country211',
+        # Structured
+        'svhn', 'gtsrb', 'mnist', 'fashionmnist', 'kmnist',
+        'emnist_letters', 'rendered_sst2', 'clevr_count', 'dsprites_loc',
+    ]
 
     for task_name in tasks_to_run:
         print(f"\n{'='*50}")
@@ -568,8 +588,14 @@ def run_spectral_analysis(config: ExperimentConfig):
         else:
             print(f"  Loaded real dataset: {len(dataset)} samples")
 
-        # Train/val split — use 10% for val (not fixed 200 which is too few for large datasets)
-        from torch.utils.data import random_split
+        # Cap dataset size for spectral analysis (252K patch_camelyon is overkill)
+        from torch.utils.data import random_split, Subset
+        if config.n_train_fft_cap > 0 and len(dataset) > config.n_train_fft_cap:
+            indices = torch.randperm(len(dataset))[:config.n_train_fft_cap].tolist()
+            dataset = Subset(dataset, indices)
+            print(f"  Capped to {len(dataset)} samples (n_train_fft_cap={config.n_train_fft_cap})")
+
+        # Train/val split — use 10% for val
         n_total = len(dataset)
         n_val = max(200, n_total // 10)  # at least 200, up to 10% of data
         n_val = min(n_val, 10000)         # cap at 10K to save compute

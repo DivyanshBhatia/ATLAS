@@ -68,6 +68,7 @@ class ExperimentConfig:
     # Training
     n_train: int = 1000        # Default for single-scale experiments
     n_train_fft: int = 0       # 0 = use ALL available data for FFT spectral analysis
+    n_train_fft_cap: int = 30000  # Cap FFT data (252K patch_camelyon is overkill)
     n_train_scales: list = field(default_factory=lambda: [200, 500, 1000, 5000, 0])
     # ^ 0 = full dataset. Tests Theorem 3 prediction: optimal method changes with n
     n_val: int = 200
