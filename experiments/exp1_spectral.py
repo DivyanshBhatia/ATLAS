@@ -174,10 +174,11 @@ def full_finetune(model, train_loader, n_classes, config, device,
         else:
             patience_counter += 1
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 1 == 0 or epoch == 0:
             lr_now = scheduler.get_last_lr()[0]
             print(f"    Epoch {epoch+1}/{config.epochs}, "
-                  f"Train: {train_loss:.4f}, Val: {val_loss:.4f}, LR: {lr_now:.6f}")
+                  f"Train: {train_loss:.4f}, Val: {val_loss:.4f}, LR: {lr_now:.6f}"
+                  f"  {'*' if val_loss <= best_val_loss else ''}")
 
         if patience_counter >= patience and epoch > config.warmup_epochs + 10:
             print(f"    Early stopping at epoch {epoch+1} (best val: {best_val_loss:.4f})")
@@ -507,9 +508,16 @@ def run_spectral_analysis(config: ExperimentConfig):
                                 num_workers=2)
 
         # Full fine-tuning
-        print(f"  Fine-tuning ({config.epochs} epochs, {n_train} train, {n_val} val)...")
+        n_batches = len(loader)
+        print(f"  Fine-tuning ({config.epochs} epochs, {n_train} train, {n_val} val)")
+        print(f"  Batches/epoch: {n_batches}, img_size: {config.img_size}x{config.img_size}")
+
+        import time as _time
+        task_start = _time.time()
         model = full_finetune(model, loader, n_classes, config, device,
                               val_loader=val_loader)
+        task_time = _time.time() - task_start
+        print(f"  Training completed in {task_time/60:.1f} minutes")
 
         # Extract weight shifts
         finetuned_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}

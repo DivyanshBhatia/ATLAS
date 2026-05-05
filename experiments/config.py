@@ -39,8 +39,8 @@ class ExperimentConfig:
     num_layers: int = 12
     head_dim: int = 64
     patch_size: int = 14
-    img_size: int = 518
-    num_patches: int = 1369  # (518/14)^2 = 37^2
+    img_size: int = 224           # 224 not 518: 16x16=256 patches vs 37x37=1369
+    num_patches: int = 256        # (224/14)^2 = 16^2
 
     # VTAB-1K tasks (grouped by category)
     vtab_natural: List[str] = field(default_factory=lambda: [
