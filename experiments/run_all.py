@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser(description='Run paper experiments')
     parser.add_argument('--exp', type=str, default='all',
                         choices=['all', 'spectral', 'comparison', 'selection',
-                                 'assumption_a'],
+                                 'lr_sweep', 'task_structure', 'assumption_a'],
                         help='Which experiment to run')
     parser.add_argument('--fast', action='store_true',
                         help='Quick mode with reduced epochs and tasks')
@@ -70,6 +70,24 @@ def main():
         from exp3_selection import run_selection_benchmark
         results = run_selection_benchmark(config)
         all_results['selection'] = results
+
+    # ---- Experiment 4: LR Sweep ----
+    if args.exp in ['all', 'lr_sweep']:
+        print("\n" + "=" * 70)
+        print("EXPERIMENT 4: LEARNING RATE SWEEP")
+        print("=" * 70)
+        from exp4_lr_sweep import run_lr_sweep
+        results = run_lr_sweep(config)
+        all_results['lr_sweep'] = results
+
+    # ---- Experiment 5: Task Structure (Training-Free) ----
+    if args.exp in ['all', 'task_structure']:
+        print("\n" + "=" * 70)
+        print("EXPERIMENT 5: TASK STRUCTURE ANALYSIS")
+        print("=" * 70)
+        from exp5_task_structure import run_task_structure_analysis
+        results = run_task_structure_analysis(config)
+        all_results['task_structure'] = results
 
     # ---- Experiment 4: Assumption A ----
     if args.exp in ['all', 'assumption_a']:
