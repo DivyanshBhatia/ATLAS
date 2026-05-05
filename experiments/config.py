@@ -69,7 +69,8 @@ class ExperimentConfig:
     # ^ 0 = full dataset. Tests Theorem 3 prediction: optimal method changes with n
     n_val: int = 200
     batch_size: int = 64
-    lr: float = 1e-3
+    lr: float = 1e-3           # For PEFT methods (small param count)
+    lr_fft: float = 2e-5       # For full fine-tuning (86M params — needs much lower LR)
     epochs: int = 100          # Standard for VTAB-1K (cosine schedule)
     weight_decay: float = 0.01
     warmup_epochs: int = 10

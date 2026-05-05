@@ -182,9 +182,10 @@ def apply_linear_probe(model, config: ExperimentConfig):
 # ============================================================================
 
 def train_and_evaluate(model, train_loader, val_loader, config, device,
-                       method_name='', max_epochs=None):
+                       method_name='', max_epochs=None, lr=None):
     """Train a PEFT model and return accuracy."""
     epochs = max_epochs or config.epochs
+    learning_rate = lr or config.lr
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -193,7 +194,7 @@ def train_and_evaluate(model, train_loader, val_loader, config, device,
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=config.lr, weight_decay=config.weight_decay
+        lr=learning_rate, weight_decay=config.weight_decay
     )
     criterion = nn.CrossEntropyLoss()
 
@@ -426,7 +427,7 @@ def run_comparison(config: ExperimentConfig):
             for param in model_fft.parameters():
                 param.requires_grad_(True)
             _ = train_and_evaluate(model_fft, fft_train_loader, fft_val_loader,
-                                   config, device, 'FFT')
+                                   config, device, 'FFT', lr=config.lr_fft)
 
             # Get fine-tuned attention maps
             ft_attn = extract_attention_maps(model_fft, fft_val_loader, device,

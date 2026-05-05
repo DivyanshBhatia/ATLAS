@@ -112,13 +112,14 @@ class SyntheticVTABDataset(torch.utils.data.Dataset):
 
 
 def full_finetune(model, train_loader, n_classes, config, device,
-                  val_loader=None):
+                  val_loader=None, lr=None):
     """Run full fine-tuning with cosine LR, warmup, and best-model selection."""
     # Replace classification head
     model.head = nn.Linear(config.embed_dim, n_classes).to(device)
     nn.init.zeros_(model.head.bias)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr,
+    learning_rate = lr or config.lr
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate,
                                   weight_decay=config.weight_decay)
     criterion = nn.CrossEntropyLoss()
 
@@ -515,7 +516,7 @@ def run_spectral_analysis(config: ExperimentConfig):
         import time as _time
         task_start = _time.time()
         model = full_finetune(model, loader, n_classes, config, device,
-                              val_loader=val_loader)
+                              val_loader=val_loader, lr=config.lr_fft)
         task_time = _time.time() - task_start
         print(f"  Training completed in {task_time/60:.1f} minutes")
 

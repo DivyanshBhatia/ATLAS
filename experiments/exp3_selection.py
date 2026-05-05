@@ -56,7 +56,7 @@ class SelectionAlgorithm:
         for param in model.parameters():
             param.requires_grad_(True)
 
-        optimizer = torch.optim.AdamW(model.parameters(), lr=self.config.lr,
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.config.lr_fft,
                                       weight_decay=self.config.weight_decay)
         criterion = nn.CrossEntropyLoss()
 
