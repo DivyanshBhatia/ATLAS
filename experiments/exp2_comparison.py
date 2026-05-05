@@ -47,8 +47,11 @@ class LoRALayer(nn.Module):
         self.original = original
         self.rank = rank
         d_in, d_out = original.in_features, original.out_features
-        self.lora_A = nn.Parameter(torch.zeros(rank, d_out))
-        self.lora_B = nn.Parameter(torch.randn(d_in, rank) * 0.01)
+        # Create on the SAME device as the original layer
+        device = original.weight.device
+        dtype = original.weight.dtype
+        self.lora_A = nn.Parameter(torch.zeros(rank, d_out, device=device, dtype=dtype))
+        self.lora_B = nn.Parameter(torch.randn(d_in, rank, device=device, dtype=dtype) * 0.01)
         # Freeze original
         self.original.weight.requires_grad_(False)
         if self.original.bias is not None:
@@ -96,9 +99,13 @@ def apply_vpt(model, n_prompts: int, config: ExperimentConfig):
     """Apply VPT-Deep (learnable prompts at every layer)."""
     d = config.embed_dim
 
-    # Store prompts for each layer
+    # Detect device from model
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+
+    # Store prompts for each layer — on the SAME device as the model
     model.vpt_prompts = nn.ParameterList([
-        nn.Parameter(torch.randn(1, n_prompts, d) * 0.02)
+        nn.Parameter(torch.randn(1, n_prompts, d, device=device, dtype=dtype) * 0.02)
         for _ in range(len(model.blocks))
     ])
 
@@ -111,12 +118,12 @@ def apply_vpt(model, n_prompts: int, config: ExperimentConfig):
         prompt_param = model.vpt_prompts[i]
 
         def make_new_forward(orig_fwd, prompt_p):
-            def new_forward(x):
+            def new_forward(x, **kwargs):
                 B = x.shape[0]
                 prompts = prompt_p.expand(B, -1, -1)
                 # Prepend prompts to the sequence
                 x = torch.cat([x[:, :1], prompts, x[:, 1:]], dim=1)
-                x = orig_fwd(x)
+                x = orig_fwd(x, **kwargs)
                 # Remove prompts from output
                 x = torch.cat([x[:, :1], x[:, 1+n_prompts:]], dim=1)
                 return x
@@ -134,13 +141,19 @@ def apply_vpt(model, n_prompts: int, config: ExperimentConfig):
 
 def apply_adapter(model, bottleneck_dim: int, config: ExperimentConfig):
     """Apply adapter layers after each transformer block."""
+    device = next(model.parameters()).device
+
+    # Register adapters as a ModuleList so params are found by named_parameters()
+    model.adapters = nn.ModuleList()
+
     for block in model.blocks:
-        adapter = AdapterLayer(config.embed_dim, bottleneck_dim)
+        adapter = AdapterLayer(config.embed_dim, bottleneck_dim).to(device)
+        model.adapters.append(adapter)
         original_forward = block.forward
 
         def make_new_forward(orig_fwd, adapt):
-            def new_forward(x):
-                x = orig_fwd(x)
+            def new_forward(x, **kwargs):
+                x = orig_fwd(x, **kwargs)
                 x = adapt(x)
                 return x
             return new_forward
@@ -149,7 +162,7 @@ def apply_adapter(model, bottleneck_dim: int, config: ExperimentConfig):
 
     # Freeze all except adapter parameters and head
     for name, param in model.named_parameters():
-        is_adapter = any(k in name for k in ['down.', 'up.'])
+        is_adapter = 'adapters' in name
         if not is_adapter and 'head' not in name:
             param.requires_grad_(False)
 
