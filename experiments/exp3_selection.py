@@ -284,21 +284,25 @@ def run_selection_benchmark(config: ExperimentConfig):
         print(f"  Selected: {selected_method} (score={selected_score['score']:.4f})")
 
         # --- Phase 2: Exhaustive search (oracle) ---
+        # Must cover the SAME methods the selection algorithm considers
         print("\n  EXHAUSTIVE SEARCH (oracle):")
         exhaustive_results = {}
 
-        methods_to_try = [
-            ('LP', lambda m: apply_linear_probe(m, config), {}),
-            ('LoRA_r4', lambda m: apply_lora(m, 4, config), {}),
-            ('LoRA_r8', lambda m: apply_lora(m, 8, config), {}),
-            ('LoRA_r16', lambda m: apply_lora(m, 16, config), {}),
-            ('VPT_p10', lambda m: apply_vpt(m, 10, config), {}),
-            ('VPT_p50', lambda m: apply_vpt(m, 50, config), {}),
-            ('Adapter_r16', lambda m: apply_adapter(m, 16, config), {}),
-            ('Adapter_r64', lambda m: apply_adapter(m, 64, config), {}),
-        ]
+        methods_to_try = [('LP', lambda m: apply_linear_probe(m, config))]
 
-        for method_name, apply_fn, _ in methods_to_try:
+        for r in config.lora_ranks:
+            methods_to_try.append(
+                (f'LoRA_r{r}', lambda m, _r=r: apply_lora(m, _r, config)))
+
+        for p in config.vpt_prompt_counts:
+            methods_to_try.append(
+                (f'VPT_p{p}', lambda m, _p=p: apply_vpt(m, _p, config)))
+
+        for r_a in config.adapter_dims:
+            methods_to_try.append(
+                (f'Adapter_r{r_a}', lambda m, _r=r_a: apply_adapter(m, _r, config)))
+
+        for method_name, apply_fn in methods_to_try:
             model = deepcopy(base_model).to(device)
             model.head = nn.Linear(config.embed_dim, n_classes).to(device)
             model = apply_fn(model)
