@@ -33,7 +33,7 @@ from config import (ExperimentConfig, setup_device, ensure_dirs, save_results,
                     compute_attention_shift, compute_feature_shift,
                     compute_quantization_error, compute_sigma_p_sq)
 
-from exp1_spectral import SyntheticVTABDataset
+from exp1_spectral import SyntheticVTABDataset, load_real_dataset
 
 
 # ============================================================================
@@ -317,11 +317,28 @@ def run_comparison(config: ExperimentConfig):
             n_classes = n_classes_map[task_name]
             task_type = 'structured' if category == 'structured' else 'natural'
 
-            # Create datasets
-            train_ds = SyntheticVTABDataset(config.n_train, n_classes,
-                                            config.img_size, task_type)
-            val_ds = SyntheticVTABDataset(config.n_val, n_classes,
-                                          config.img_size, task_type)
+            # Create datasets — try real data first
+            train_ds = load_real_dataset(task_name, n_classes, config)
+            if train_ds is None:
+                print(f"  Falling back to synthetic data")
+                train_ds = SyntheticVTABDataset(config.n_train, n_classes,
+                                                config.img_size, task_type)
+                val_ds = SyntheticVTABDataset(config.n_val, n_classes,
+                                              config.img_size, task_type)
+            else:
+                print(f"  Loaded real dataset: {len(train_ds)} samples")
+                # Use last portion as validation
+                from torch.utils.data import random_split
+                total = len(train_ds)
+                if total > config.n_val + 100:
+                    train_ds, val_ds = random_split(
+                        train_ds,
+                        [total - config.n_val, config.n_val]
+                    )
+                else:
+                    val_ds = SyntheticVTABDataset(config.n_val, n_classes,
+                                                  config.img_size, task_type)
+
             train_loader = DataLoader(train_ds, batch_size=config.batch_size,
                                       shuffle=True, num_workers=0)
             val_loader = DataLoader(val_ds, batch_size=config.batch_size,

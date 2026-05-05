@@ -25,7 +25,7 @@ from config import (ExperimentConfig, setup_device, ensure_dirs, save_results,
                     compute_svd_profile, fit_spectral_decay,
                     compute_quantization_error, compute_pac_bayes_bound,
                     compute_lora_kl, compute_sigma_p_sq)
-from exp1_spectral import SyntheticVTABDataset
+from exp1_spectral import SyntheticVTABDataset, load_real_dataset
 from exp2_comparison import (apply_lora, apply_vpt, apply_adapter,
                               apply_linear_probe, train_and_evaluate,
                               extract_attention_maps)
@@ -235,10 +235,23 @@ def run_selection_benchmark(config: ExperimentConfig):
         category = config.task_category(task_name)
         task_type = 'structured' if category == 'structured' else 'natural'
 
-        train_ds = SyntheticVTABDataset(config.n_train, n_classes,
-                                        config.img_size, task_type)
-        val_ds = SyntheticVTABDataset(config.n_val, n_classes,
-                                      config.img_size, task_type)
+        train_ds = load_real_dataset(task_name, n_classes, config)
+        if train_ds is None:
+            print(f"  Falling back to synthetic data")
+            train_ds = SyntheticVTABDataset(config.n_train, n_classes,
+                                            config.img_size, task_type)
+            val_ds = SyntheticVTABDataset(config.n_val, n_classes,
+                                          config.img_size, task_type)
+        else:
+            print(f"  Loaded real dataset: {len(train_ds)} samples")
+            from torch.utils.data import random_split
+            total = len(train_ds)
+            if total > config.n_val + 100:
+                train_ds, val_ds = random_split(
+                    train_ds, [total - config.n_val, config.n_val])
+            else:
+                val_ds = SyntheticVTABDataset(config.n_val, n_classes,
+                                              config.img_size, task_type)
 
         # Split train into pilot + actual
         n_pilot = config.n_train // 4
