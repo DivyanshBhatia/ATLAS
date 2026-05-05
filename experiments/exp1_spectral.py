@@ -111,8 +111,9 @@ class SyntheticVTABDataset(torch.utils.data.Dataset):
         return img, label
 
 
-def full_finetune(model, train_loader, n_classes, config, device):
-    """Run full fine-tuning and return the fine-tuned model."""
+def full_finetune(model, train_loader, n_classes, config, device,
+                  val_loader=None):
+    """Run full fine-tuning with cosine LR, warmup, and best-model selection."""
     # Replace classification head
     model.head = nn.Linear(config.embed_dim, n_classes).to(device)
     nn.init.zeros_(model.head.bias)
@@ -121,8 +122,25 @@ def full_finetune(model, train_loader, n_classes, config, device):
                                   weight_decay=config.weight_decay)
     criterion = nn.CrossEntropyLoss()
 
-    model.train()
+    # Cosine schedule with linear warmup
+    total_steps = config.epochs * len(train_loader)
+    warmup_steps = config.warmup_epochs * len(train_loader)
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(warmup_steps, 1)
+        progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+        return 0.5 * (1 + np.cos(np.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    best_state = None
+    best_val_loss = float('inf')
+    patience_counter = 0
+    patience = 15
+
     for epoch in range(config.epochs):
+        model.train()
         total_loss = 0
         for batch_x, batch_y in train_loader:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
@@ -130,11 +148,44 @@ def full_finetune(model, train_loader, n_classes, config, device):
             logits = model(batch_x)
             loss = criterion(logits, batch_y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
             total_loss += loss.item()
 
+        train_loss = total_loss / len(train_loader)
+
+        # Validate
+        val_loss = train_loss
+        if val_loader is not None:
+            model.eval()
+            val_total, val_count = 0, 0
+            with torch.no_grad():
+                for batch_x, batch_y in val_loader:
+                    batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                    val_total += criterion(model(batch_x), batch_y).item() * batch_y.shape[0]
+                    val_count += batch_y.shape[0]
+            val_loss = val_total / max(val_count, 1)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
         if (epoch + 1) % 10 == 0:
-            print(f"    Epoch {epoch+1}/{config.epochs}, Loss: {total_loss/len(train_loader):.4f}")
+            lr_now = scheduler.get_last_lr()[0]
+            print(f"    Epoch {epoch+1}/{config.epochs}, "
+                  f"Train: {train_loss:.4f}, Val: {val_loss:.4f}, LR: {lr_now:.6f}")
+
+        if patience_counter >= patience and epoch > config.warmup_epochs + 10:
+            print(f"    Early stopping at epoch {epoch+1} (best val: {best_val_loss:.4f})")
+            break
+
+    if best_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+        print(f"    Restored best model (val loss: {best_val_loss:.4f})")
 
     return model
 
@@ -326,12 +377,22 @@ def run_spectral_analysis(config: ExperimentConfig):
         else:
             print(f"  Loaded real dataset: {len(dataset)} samples")
 
-        loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True,
+        # Train/val split
+        from torch.utils.data import random_split
+        n_total = len(dataset)
+        n_val = min(config.n_val, n_total // 5)
+        n_train = n_total - n_val
+        train_ds, val_ds = random_split(dataset, [n_train, n_val])
+
+        loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True,
                             num_workers=2)
+        val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False,
+                                num_workers=2)
 
         # Full fine-tuning
-        print(f"  Fine-tuning ({config.epochs} epochs)...")
-        model = full_finetune(model, loader, n_classes, config, device)
+        print(f"  Fine-tuning ({config.epochs} epochs, {n_train} train, {n_val} val)...")
+        model = full_finetune(model, loader, n_classes, config, device,
+                              val_loader=val_loader)
 
         # Extract weight shifts
         finetuned_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
