@@ -293,10 +293,10 @@ def run_comparison(config: ExperimentConfig):
 
     print("\nLoading pretrained model...")
     try:
-        base_model = timm.create_model(config.model_name, pretrained=True)
+        base_model = timm.create_model(config.model_name, pretrained=True, img_size=config.img_size)
     except Exception:
         print("Cannot download model. Using random init.")
-        base_model = timm.create_model(config.model_name, pretrained=False)
+        base_model = timm.create_model(config.model_name, pretrained=False, img_size=config.img_size)
 
     pretrained_state = {k: v.cpu().clone() for k, v in base_model.state_dict().items()}
 

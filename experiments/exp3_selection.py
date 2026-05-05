@@ -218,9 +218,9 @@ def run_selection_benchmark(config: ExperimentConfig):
     ensure_dirs(config)
 
     try:
-        base_model = timm.create_model(config.model_name, pretrained=True)
+        base_model = timm.create_model(config.model_name, pretrained=True, img_size=config.img_size)
     except Exception:
-        base_model = timm.create_model(config.model_name, pretrained=False)
+        base_model = timm.create_model(config.model_name, pretrained=False, img_size=config.img_size)
 
     pretrained_state = {k: v.cpu().clone() for k, v in base_model.state_dict().items()}
 

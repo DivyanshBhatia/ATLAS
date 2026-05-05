@@ -444,10 +444,10 @@ def run_spectral_analysis(config: ExperimentConfig):
     # Load pretrained model
     print("\nLoading pretrained model...")
     try:
-        model = timm.create_model(config.model_name, pretrained=True)
+        model = timm.create_model(config.model_name, pretrained=True, img_size=config.img_size)
     except Exception:
         print("Cannot download pretrained model. Using random init for demo.")
-        model = timm.create_model(config.model_name, pretrained=False)
+        model = timm.create_model(config.model_name, pretrained=False, img_size=config.img_size)
 
     model = model.to(device)
     pretrained_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
