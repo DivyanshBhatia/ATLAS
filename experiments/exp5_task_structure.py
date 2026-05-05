@@ -27,13 +27,17 @@ from config import ExperimentConfig, setup_device, ensure_dirs, save_results
 from exp1_spectral import load_real_dataset, SyntheticVTABDataset
 
 
-def extract_features_and_attention(model, dataloader, device, max_batches=None):
+def extract_features_and_attention(model, dataloader, device,
+                                    max_attn_batches=80):
     """
-    Single forward pass: extract CLS features and attention maps.
+    Two-phase extraction:
+    - Features (CLS token): extracted for ALL samples (768 floats each, tiny)
+    - Attention maps: extracted for first max_attn_batches only (memory-heavy)
+
     Returns:
-        features: [n_samples, embed_dim]
-        labels: [n_samples]
-        attention_maps: list of [n_samples, n_heads, seq_len, seq_len] per layer
+        features: [n_samples, embed_dim]  — ALL samples
+        labels: [n_samples]               — ALL samples
+        attention_maps: dict of [n_attn_samples, n_heads, seq_len, seq_len] — subset
     """
     model.eval()
     all_features = []
@@ -41,9 +45,12 @@ def extract_features_and_attention(model, dataloader, device, max_batches=None):
     attn_per_layer = {l: [] for l in range(len(model.blocks))}
 
     hooks = []
+    capture_attention = [True]  # mutable flag to control hook behavior
 
     def make_hook(layer_idx):
         def hook_fn(module, input, output):
+            if not capture_attention[0]:
+                return
             B, N, C = input[0].shape
             H = module.num_heads
             d_h = C // H
@@ -58,11 +65,13 @@ def extract_features_and_attention(model, dataloader, device, max_batches=None):
 
     with torch.no_grad():
         for batch_idx, (batch_x, batch_y) in enumerate(dataloader):
-            if max_batches and batch_idx >= max_batches:
-                break
             batch_x = batch_x.to(device)
+
+            # Stop capturing attention after max_attn_batches (saves memory)
+            if batch_idx >= max_attn_batches:
+                capture_attention[0] = False
+
             out = model.forward_features(batch_x)
-            # CLS token features
             cls_features = out[:, 0].cpu()
             all_features.append(cls_features)
             all_labels.append(batch_y)
@@ -330,22 +339,24 @@ def run_task_structure_analysis(config: ExperimentConfig):
         print(f"{'='*55}")
 
         try:
-            # Load data (1000 samples is plenty for feature extraction)
+            # Load ALL available data — features are tiny (768 floats each),
+            # attention is only captured for first 5000 samples
             dataset = load_real_dataset(task_name, n_classes, config,
-                                        max_samples=1000)
+                                        max_samples=0)  # 0 = all
             if dataset is None:
                 print(f"  SKIPPED — no real dataset available")
                 continue
 
-            print(f"  Loaded: {len(dataset)} samples")
+            print(f"  Loaded: {len(dataset)} samples (all available)")
 
-            loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=2)
+            loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=2)
 
-            # --- Extract features and attention ---
+            # --- Extract features (ALL samples) and attention (first 5000) ---
             print("  Extracting features and attention maps...")
             features, labels, attention = extract_features_and_attention(
-                model, loader, device, max_batches=20)
-            print(f"  Extracted: {features.shape[0]} samples, {features.shape[1]}d features")
+                model, loader, device, max_attn_batches=80)  # 80×64=5120 for attention
+            print(f"  Extracted: {features.shape[0]} features, "
+                  f"~{min(features.shape[0], 5120)} attention samples")
 
             # --- Metric 1: Linear Probe Accuracy ---
             lp_acc = measure_linear_probe_accuracy(features, labels, n_classes)
@@ -362,8 +373,11 @@ def run_task_structure_analysis(config: ExperimentConfig):
                   f"(normalized: {norm_ent:.4f})")
 
             # --- Metric 4: Attention Class Variance ---
+            # Attention maps cover fewer samples than features — use matching labels
+            n_attn = attention[0].shape[0] if 0 in attention and len(attention[0]) > 0 else 0
+            attn_labels = labels[:n_attn] if n_attn > 0 else labels
             between_var, within_var, attn_ratio = measure_attention_class_variance(
-                attention, labels, config.num_layers)
+                attention, attn_labels, config.num_layers)
             print(f"  Attention class variance: between={between_var:.6f}, "
                   f"within={within_var:.6f}, ratio={attn_ratio:.4f}")
 
