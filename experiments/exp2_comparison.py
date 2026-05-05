@@ -277,15 +277,20 @@ def extract_attention_maps(model, dataloader, device, max_batches=5):
 # ============================================================================
 
 def run_comparison(config: ExperimentConfig):
-    """Run the full PEFT method comparison."""
+    """Run PEFT method comparison across multiple data scales.
+
+    Validates:
+    - Theorem 1: VPT wins structured tasks, LoRA wins natural tasks
+    - Theorem 2: Accuracy vs capacity follows predicted rates
+    - Theorem 3: Optimal method changes with n
+    """
     print("=" * 70)
-    print("EXPERIMENT 2: PEFT METHOD COMPARISON")
+    print("EXPERIMENT 2: PEFT METHOD COMPARISON (multi-scale)")
     print("=" * 70)
 
     device = setup_device()
     ensure_dirs(config)
 
-    # Load pretrained model
     print("\nLoading pretrained model...")
     try:
         base_model = timm.create_model(config.model_name, pretrained=True)
@@ -296,14 +301,15 @@ def run_comparison(config: ExperimentConfig):
     pretrained_state = {k: v.cpu().clone() for k, v in base_model.state_dict().items()}
 
     tasks_to_run = {
-        'natural': ['cifar100', 'dtd'],
+        'natural': ['cifar100', 'dtd', 'svhn'],
         'specialized': ['eurosat'],
-        'structured': ['clevr_count', 'dsprites_loc'],
+        'structured': ['gtsrb', 'clevr_count', 'dsprites_loc'],
+        # gtsrb: guaranteed via torchvision
+        # clevr_count, dsprites_loc: via HuggingFace (fallback to synthetic)
     }
-
     n_classes_map = {
-        'cifar100': 100, 'dtd': 47, 'eurosat': 10,
-        'clevr_count': 8, 'dsprites_loc': 16,
+        'cifar100': 100, 'dtd': 47, 'svhn': 10, 'eurosat': 10,
+        'gtsrb': 43, 'clevr_count': 8, 'dsprites_loc': 16,
     }
 
     all_results = {}
@@ -317,178 +323,221 @@ def run_comparison(config: ExperimentConfig):
             n_classes = n_classes_map[task_name]
             task_type = 'structured' if category == 'structured' else 'natural'
 
-            # Create datasets — try real data first
-            train_ds = load_real_dataset(task_name, n_classes, config)
-            if train_ds is None:
+            # Load FULL dataset once
+            full_dataset = load_real_dataset(task_name, n_classes, config,
+                                             max_samples=0)
+            if full_dataset is None:
                 print(f"  Falling back to synthetic data")
-                train_ds = SyntheticVTABDataset(config.n_train, n_classes,
-                                                config.img_size, task_type)
-                val_ds = SyntheticVTABDataset(config.n_val, n_classes,
-                                              config.img_size, task_type)
+                full_dataset = SyntheticVTABDataset(5000, n_classes,
+                                                    config.img_size, task_type)
             else:
-                print(f"  Loaded real dataset: {len(train_ds)} samples")
-                # Use last portion as validation
-                from torch.utils.data import random_split
-                total = len(train_ds)
-                if total > config.n_val + 100:
-                    train_ds, val_ds = random_split(
-                        train_ds,
-                        [total - config.n_val, config.n_val]
-                    )
+                print(f"  Loaded full dataset: {len(full_dataset)} samples")
+
+            task_results = {'category': category, 'scales': {}}
+
+            for n_scale in config.n_train_scales:
+                n_use = len(full_dataset) if n_scale == 0 else min(n_scale, len(full_dataset))
+                n_val = min(config.n_val, n_use // 5)
+                n_train = n_use - n_val
+
+                print(f"\n  --- n_train = {n_train}, n_val = {n_val} ---")
+
+                from torch.utils.data import random_split, Subset
+                if n_use < len(full_dataset):
+                    indices = torch.randperm(len(full_dataset))[:n_use].tolist()
+                    subset = Subset(full_dataset, indices)
                 else:
-                    val_ds = SyntheticVTABDataset(config.n_val, n_classes,
-                                                  config.img_size, task_type)
+                    subset = full_dataset
 
-            train_loader = DataLoader(train_ds, batch_size=config.batch_size,
-                                      shuffle=True, num_workers=0)
-            val_loader = DataLoader(val_ds, batch_size=config.batch_size,
-                                    shuffle=False, num_workers=0)
+                train_ds, val_ds = random_split(subset, [n_train, n_val])
+                train_loader = DataLoader(train_ds, batch_size=config.batch_size,
+                                          shuffle=True, num_workers=2)
+                val_loader = DataLoader(val_ds, batch_size=config.batch_size,
+                                        shuffle=False, num_workers=2)
 
-            task_results = {'category': category, 'methods': {}}
+                scale_results = {}
 
-            # --- Linear Probing ---
-            print("\n  [1/5] Linear Probing")
-            model = deepcopy(base_model).to(device)
-            model.head = nn.Linear(config.embed_dim, n_classes).to(device)
-            model = apply_linear_probe(model, config)
-            acc = train_and_evaluate(model, train_loader, val_loader, config,
-                                     device, 'LP')
-            task_results['methods']['LP'] = {'accuracy': acc, 'params': 'head only'}
-            del model
-
-            # --- LoRA (multiple ranks) ---
-            for r in [4, 8, 16]:
-                print(f"\n  [LoRA] Rank {r}")
+                # LP
                 model = deepcopy(base_model).to(device)
                 model.head = nn.Linear(config.embed_dim, n_classes).to(device)
-                model = apply_lora(model, r, config)
+                model = apply_linear_probe(model, config)
                 acc = train_and_evaluate(model, train_loader, val_loader, config,
-                                         device, f'LoRA(r={r})')
-                task_results['methods'][f'LoRA_r{r}'] = {
-                    'accuracy': acc,
-                    'rank': r,
-                    'params': sum(p.numel() for p in model.parameters() if p.requires_grad),
-                }
+                                         device, 'LP')
+                scale_results['LP'] = {'accuracy': acc}
                 del model
 
-            # --- VPT (multiple prompt counts) ---
-            for p in [10, 50]:
-                print(f"\n  [VPT] {p} prompts")
-                model = deepcopy(base_model).to(device)
-                model.head = nn.Linear(config.embed_dim, n_classes).to(device)
-                model = apply_vpt(model, p, config)
-                acc = train_and_evaluate(model, train_loader, val_loader, config,
-                                         device, f'VPT(p={p})')
-                task_results['methods'][f'VPT_p{p}'] = {
-                    'accuracy': acc,
-                    'n_prompts': p,
-                    'params': sum(p_.numel() for p_ in model.parameters() if p_.requires_grad),
-                }
-                del model
+                # LoRA — expanded grid for rate curve fitting (Theorem 2b)
+                for r in [1, 2, 4, 8, 16, 32]:
+                    model = deepcopy(base_model).to(device)
+                    model.head = nn.Linear(config.embed_dim, n_classes).to(device)
+                    model = apply_lora(model, r, config)
+                    acc = train_and_evaluate(model, train_loader, val_loader, config,
+                                             device, f'LoRA(r={r})')
+                    scale_results[f'LoRA_r{r}'] = {'accuracy': acc, 'rank': r}
+                    del model
 
-            # --- Adapter ---
-            for r_a in [16, 64]:
-                print(f"\n  [Adapter] dim {r_a}")
-                model = deepcopy(base_model).to(device)
-                model.head = nn.Linear(config.embed_dim, n_classes).to(device)
-                model = apply_adapter(model, r_a, config)
-                acc = train_and_evaluate(model, train_loader, val_loader, config,
-                                         device, f'Adapter(r_a={r_a})')
-                task_results['methods'][f'Adapter_r{r_a}'] = {
-                    'accuracy': acc,
-                    'bottleneck': r_a,
-                    'params': sum(p_.numel() for p_ in model.parameters() if p_.requires_grad),
-                }
-                del model
+                # VPT — expanded grid to detect plateau (Theorem 2c)
+                for p in [1, 5, 10, 20, 50]:
+                    model = deepcopy(base_model).to(device)
+                    model.head = nn.Linear(config.embed_dim, n_classes).to(device)
+                    model = apply_vpt(model, p, config)
+                    acc = train_and_evaluate(model, train_loader, val_loader, config,
+                                             device, f'VPT(p={p})')
+                    scale_results[f'VPT_p{p}'] = {'accuracy': acc, 'n_prompts': p}
+                    del model
 
-            # --- Task Characterization (from FFT) ---
-            print("\n  [Task Characterization] Running FFT for descriptors...")
-            model = deepcopy(base_model).to(device)
-            model.head = nn.Linear(config.embed_dim, n_classes).to(device)
+                # Adapter
+                for r_a in [8, 32, 64]:
+                    model = deepcopy(base_model).to(device)
+                    model.head = nn.Linear(config.embed_dim, n_classes).to(device)
+                    model = apply_adapter(model, r_a, config)
+                    acc = train_and_evaluate(model, train_loader, val_loader, config,
+                                             device, f'Adapter(r_a={r_a})')
+                    scale_results[f'Adapter_r{r_a}'] = {'accuracy': acc, 'bottleneck': r_a}
+                    del model
+
+                task_results['scales'][str(n_train)] = scale_results
+                best = max(scale_results, key=lambda k: scale_results[k]['accuracy'])
+                print(f"  Best at n={n_train}: {best} ({scale_results[best]['accuracy']:.4f})")
+
+            # ==============================================================
+            # Task Characterization (run ONCE per task on full data)
+            # Measures S_attn, S_feat, sin²θ, α to correlate with winners
+            # ==============================================================
+            print(f"\n  [Task Characterization] FFT on full data...")
+            model_fft = deepcopy(base_model).to(device)
+            model_fft.head = nn.Linear(config.embed_dim, n_classes).to(device)
+
+            # Full dataset for FFT
+            from torch.utils.data import random_split as rs2
+            n_fft_total = len(full_dataset)
+            n_fft_val = min(config.n_val, n_fft_total // 5)
+            fft_train, fft_val = rs2(full_dataset, [n_fft_total - n_fft_val, n_fft_val])
+            fft_train_loader = DataLoader(fft_train, batch_size=config.batch_size,
+                                          shuffle=True, num_workers=2)
+            fft_val_loader = DataLoader(fft_val, batch_size=config.batch_size,
+                                        shuffle=False, num_workers=2)
 
             # Get pretrained attention maps
-            pre_attn = extract_attention_maps(model, val_loader, device, max_batches=3)
+            pre_attn = extract_attention_maps(model_fft, fft_val_loader, device,
+                                              max_batches=3)
 
-            # FFT
-            for param in model.parameters():
+            # Run FFT
+            for param in model_fft.parameters():
                 param.requires_grad_(True)
-            _ = train_and_evaluate(model, train_loader, val_loader, config,
-                                   device, 'FFT', max_epochs=config.epochs)
+            _ = train_and_evaluate(model_fft, fft_train_loader, fft_val_loader,
+                                   config, device, 'FFT')
 
             # Get fine-tuned attention maps
-            ft_attn = extract_attention_maps(model, val_loader, device, max_batches=3)
+            ft_attn = extract_attention_maps(model_fft, fft_val_loader, device,
+                                              max_batches=3)
 
             # Compute S_attn
+            s_attn = 0.0
             if pre_attn and ft_attn:
                 n_imgs = min(len(pre_attn), len(ft_attn))
-                s_attn_values = []
+                s_attn_vals = []
                 for i in range(n_imgs):
                     for l in pre_attn[i]:
                         if l in ft_attn[i]:
-                            diff = (ft_attn[i][l] - pre_attn[i][l])
-                            # CLS attention to patches: [H, 0, 1:]
-                            cls_diff = diff[:, 0, 1:]
-                            s_attn_values.append((cls_diff ** 2).mean().item())
-                s_attn = float(np.mean(s_attn_values)) if s_attn_values else 0.0
-            else:
-                s_attn = 0.0
+                            cls_diff = ft_attn[i][l][:, 0, 1:] - pre_attn[i][l][:, 0, 1:]
+                            s_attn_vals.append((cls_diff ** 2).mean().item())
+                s_attn = float(np.mean(s_attn_vals)) if s_attn_vals else 0.0
 
-            # Spectral profile
-            fft_state = {k: v.cpu() for k, v in model.state_dict().items()}
+            # Compute spectral profile and T(r)
+            fft_state = {k: v.cpu() for k, v in model_fft.state_dict().items()}
             alphas = []
+            spectral_tails = {str(r): 0.0 for r in [1, 2, 4, 8, 16, 32]}
             for name in pretrained_state:
                 if 'qkv.weight' in name or 'proj.weight' in name:
                     delta = fft_state[name].float() - pretrained_state[name].float()
                     sv = compute_svd_profile(delta)
-                    alpha, C = fit_spectral_decay(sv)
-                    alphas.append(alpha)
+                    alpha_val, C_val = fit_spectral_decay(sv)
+                    alphas.append(alpha_val)
+                    for r in [1, 2, 4, 8, 16, 32]:
+                        spectral_tails[str(r)] += float((sv[r:] ** 2).sum())
 
             task_results['task_descriptors'] = {
                 'S_attn': s_attn,
                 'mean_alpha': float(np.mean(alphas)) if alphas else 0.0,
+                'spectral_tails': spectral_tails,
                 'category': category,
             }
 
-            all_results[task_name] = task_results
-            del model
+            print(f"  Task descriptors: S_attn={s_attn:.6f}, "
+                  f"α={task_results['task_descriptors']['mean_alpha']:.3f}")
 
-            # Print comparison
-            print(f"\n  Results for {task_name}:")
-            methods_sorted = sorted(task_results['methods'].items(),
-                                    key=lambda x: -x[1]['accuracy'])
-            for name, res in methods_sorted:
-                print(f"    {name:20s}: {res['accuracy']:.4f}")
-            print(f"  S_attn = {s_attn:.6f}, α = {task_results['task_descriptors']['mean_alpha']:.3f}")
+            del model_fft
+
+            all_results[task_name] = task_results
 
     # Summary
     print("\n" + "=" * 70)
-    print("THEOREM VALIDATION SUMMARY")
+    print("THEOREM 3 VALIDATION: Optimal Method vs. Data Scale")
     print("=" * 70)
 
     for task_name, res in all_results.items():
-        methods = res['methods']
+        print(f"\n  {task_name} ({res['category']}):")
+        for n_str in sorted(res['scales'].keys(), key=lambda x: int(x)):
+            scale_res = res['scales'][n_str]
+            best = max(scale_res, key=lambda k: scale_res[k]['accuracy'])
+            acc = scale_res[best]['accuracy']
+            print(f"    n={int(n_str):>6d}: {best:15s} ({acc:.4f})")
+
+    print("\n  Expected: LP at small n → LoRA at moderate n → higher capacity at large n")
+
+    # ============================================================================
+    # Cross-experiment: Correlate task descriptors with method winners
+    # ============================================================================
+    print("\n" + "=" * 70)
+    print("THEOREM 1 VALIDATION: Task Descriptors vs. Method Winners")
+    print("=" * 70)
+
+    for task_name, res in all_results.items():
+        td = res.get('task_descriptors', {})
         cat = res['category']
+        s_attn = td.get('S_attn', 0)
+        alpha = td.get('mean_alpha', 0)
 
-        # Find best LoRA and best VPT
-        lora_accs = {k: v['accuracy'] for k, v in methods.items() if 'LoRA' in k}
-        vpt_accs = {k: v['accuracy'] for k, v in methods.items() if 'VPT' in k}
+        # Get best LoRA vs VPT at the largest scale
+        largest_scale = max(res['scales'].keys(), key=lambda x: int(x))
+        scale_res = res['scales'][largest_scale]
 
-        if lora_accs and vpt_accs:
-            best_lora = max(lora_accs.values())
-            best_vpt = max(vpt_accs.values())
-            winner = "LoRA" if best_lora > best_vpt else "VPT"
+        lora_best = max((v['accuracy'] for k, v in scale_res.items() if 'LoRA' in k), default=0)
+        vpt_best = max((v['accuracy'] for k, v in scale_res.items() if 'VPT' in k), default=0)
+        winner = "LoRA" if lora_best >= vpt_best else "VPT"
 
-            expected = "VPT" if cat == 'structured' else "LoRA"
-            match = "✓" if winner == expected else "✗"
+        print(f"  {task_name:15s}: S_attn={s_attn:.6f}, α={alpha:.3f} → "
+              f"LoRA={lora_best:.3f} vs VPT={vpt_best:.3f} → {winner}")
 
-            print(f"  {task_name:20s} ({cat:12s}): LoRA={best_lora:.3f}, "
-                  f"VPT={best_vpt:.3f} → {winner} wins "
-                  f"(predicted: {expected}) {match}")
+    print("\n  Theory predicts: high S_attn → VPT wins; high α → LoRA needs low rank")
+
+    # ============================================================================
+    # Cross-experiment: T(r) vs LoRA accuracy (Theorem 2b validation)
+    # ============================================================================
+    print("\n" + "=" * 70)
+    print("THEOREM 2 VALIDATION: Spectral Tail T(r) vs. LoRA Accuracy")
+    print("=" * 70)
+
+    for task_name, res in all_results.items():
+        td = res.get('task_descriptors', {})
+        tails = td.get('spectral_tails', {})
+        largest_scale = max(res['scales'].keys(), key=lambda x: int(x))
+        scale_res = res['scales'][largest_scale]
+
+        print(f"\n  {task_name} (α={td.get('mean_alpha', 0):.3f}):")
+        print(f"    {'Rank':>6s}  {'T(r)':>12s}  {'LoRA Acc':>10s}  {'1-Acc':>10s}")
+        for r in [1, 2, 4, 8, 16, 32]:
+            tail = tails.get(str(r), 0)
+            acc = scale_res.get(f'LoRA_r{r}', {}).get('accuracy', 0)
+            print(f"    {r:>6d}  {tail:>12.2f}  {acc:>10.4f}  {1-acc:>10.4f}")
+
+    print("\n  Theory predicts: (1 - accuracy) ∝ T(r) ∝ r^{1-2α}")
 
     save_results(all_results, 'experiment2_comparison.json', config)
     return all_results
 
 
 if __name__ == '__main__':
-    config = ExperimentConfig(epochs=20)
+    config = ExperimentConfig()
     run_comparison(config)

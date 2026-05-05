@@ -214,15 +214,20 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
                       max_samples: int = None):
     """
     Load a real dataset for VTAB experiments.
-    Tries torchvision, then HuggingFace, then returns None for fallback.
+    Tries torchvision → HuggingFace → returns None.
 
     Args:
-        max_samples: override for config.n_train (use more data for FFT/spectral)
+        max_samples: How many samples to use. None = config.n_train, 0 = ALL.
     """
     from torchvision import transforms
     from torch.utils.data import Subset
 
-    n_samples = max_samples or config.n_train
+    if max_samples is None:
+        n_samples = config.n_train
+    elif max_samples == 0:
+        n_samples = None  # use all
+    else:
+        n_samples = max_samples
 
     transform = transforms.Compose([
         transforms.Resize((config.img_size, config.img_size)),
@@ -231,49 +236,83 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
                              std=[0.229, 0.224, 0.225]),
     ])
 
-    # --- Try torchvision datasets first (most reliable) ---
+    def maybe_subsample(ds):
+        if n_samples is None or n_samples >= len(ds):
+            return ds
+        indices = torch.randperm(len(ds))[:n_samples].tolist()
+        return Subset(ds, indices)
+
+    # --- torchvision datasets ---
     try:
         import torchvision.datasets as tv_datasets
 
-        if task_name == 'cifar100':
-            ds = tv_datasets.CIFAR100(root='./data', train=True, download=True,
-                                       transform=transform)
-            indices = torch.randperm(len(ds))[:n_samples].tolist()
-            return Subset(ds, indices)
+        tv_loaders = {
+            'cifar100': lambda: tv_datasets.CIFAR100(
+                root='./data', train=True, download=True, transform=transform),
+            'svhn': lambda: tv_datasets.SVHN(
+                root='./data', split='train', download=True, transform=transform),
+            'dtd': lambda: tv_datasets.DTD(
+                root='./data', split='train', download=True, transform=transform),
+            'oxford_flowers102': lambda: tv_datasets.Flowers102(
+                root='./data', split='train', download=True, transform=transform),
+            'eurosat': lambda: tv_datasets.EuroSAT(
+                root='./data', download=True, transform=transform),
+            # Structured tasks available in torchvision:
+            'gtsrb': lambda: tv_datasets.GTSRB(
+                root='./data', split='train', download=True, transform=transform),
+            'mnist': lambda: tv_datasets.MNIST(
+                root='./data', train=True, download=True,
+                transform=transforms.Compose([
+                    transforms.Grayscale(3),  # convert to 3-channel
+                    transforms.Resize((config.img_size, config.img_size)),
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+                ])),
+        }
 
-        elif task_name == 'svhn':
-            ds = tv_datasets.SVHN(root='./data', split='train', download=True,
-                                   transform=transform)
-            indices = torch.randperm(len(ds))[:n_samples].tolist()
-            return Subset(ds, indices)
-
-        elif task_name == 'dtd':
-            ds = tv_datasets.DTD(root='./data', split='train', download=True,
-                                  transform=transform)
-            indices = torch.randperm(len(ds))[:n_samples].tolist()
-            return Subset(ds, indices)
-
-        elif task_name == 'oxford_flowers102':
-            ds = tv_datasets.Flowers102(root='./data', split='train', download=True,
-                                         transform=transform)
-            indices = torch.randperm(len(ds))[:n_samples].tolist()
-            return Subset(ds, indices)
-
-        elif task_name == 'eurosat':
-            ds = tv_datasets.EuroSAT(root='./data', download=True,
-                                      transform=transform)
-            indices = torch.randperm(len(ds))[:n_samples].tolist()
-            return Subset(ds, indices)
+        if task_name in tv_loaders:
+            ds = tv_loaders[task_name]()
+            print(f"  Loaded {task_name} via torchvision: {len(ds)} samples")
+            return maybe_subsample(ds)
 
     except Exception as e:
         print(f"  torchvision load failed for {task_name}: {e}")
 
-    # --- Try HuggingFace datasets ---
+    # --- HuggingFace datasets ---
     try:
         from datasets import load_dataset
         from PIL import Image
 
-        hf_map = {
+        class HFDatasetWrapper(torch.utils.data.Dataset):
+            """Wraps a HuggingFace dataset for PyTorch training."""
+            def __init__(self, hf_ds, img_key, lbl_key, tfm, n_max,
+                         label_fn=None):
+                self.ds = hf_ds
+                self.img_key = img_key
+                self.lbl_key = lbl_key
+                self.label_fn = label_fn  # optional label transform
+                self.transform = tfm
+                self.n = min(n_max, len(hf_ds)) if n_max else len(hf_ds)
+
+            def __len__(self):
+                return self.n
+
+            def __getitem__(self, idx):
+                item = self.ds[idx]
+                img = item[self.img_key]
+                if not isinstance(img, Image.Image):
+                    img = Image.fromarray(np.array(img))
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                img = self.transform(img)
+                if self.label_fn:
+                    label = self.label_fn(item)
+                else:
+                    label = item[self.lbl_key]
+                return img, label
+
+        # Standard HF datasets (image_key, label_key)
+        hf_simple = {
             'cifar100': ('cifar100', None, 'fine_label', 'img'),
             'caltech101': ('caltech101', None, 'label', 'image'),
             'dtd': ('dtd', None, 'label', 'image'),
@@ -281,44 +320,114 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
             'eurosat': ('timm/eurosat-rgb', None, 'label', 'image'),
             'patch_camelyon': ('1aurent/PatchCamelyon', None, 'label', 'image'),
             'resisc45': ('timm/resisc45', None, 'label', 'image'),
-            'clevr_count': None,  # needs special handling
-            'dsprites_loc': None,
-            'smallnorb_azi': None,
+            'sun397': ('tanganke/sun397', None, 'label', 'image'),
+            'oxford_iiit_pet': ('timm/oxford-iiit-pet', None, 'label', 'image'),
         }
 
-        if task_name in hf_map and hf_map[task_name] is not None:
-            ds_name, ds_config, label_key, image_key = hf_map[task_name]
+        if task_name in hf_simple:
+            ds_name, ds_config, lbl_key, img_key = hf_simple[task_name]
             ds = load_dataset(ds_name, ds_config, split='train',
                               trust_remote_code=True)
-
-            class HFDatasetWrapper(torch.utils.data.Dataset):
-                def __init__(self, hf_ds, img_key, lbl_key, tfm, max_samples):
-                    self.ds = hf_ds
-                    self.img_key = img_key
-                    self.lbl_key = lbl_key
-                    self.transform = tfm
-                    self.indices = list(range(min(max_samples, len(hf_ds))))
-
-                def __len__(self):
-                    return len(self.indices)
-
-                def __getitem__(self, idx):
-                    item = self.ds[self.indices[idx]]
-                    img = item[self.img_key]
-                    if not isinstance(img, Image.Image):
-                        img = Image.fromarray(np.array(img))
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    img = self.transform(img)
-                    label = item[self.lbl_key]
-                    return img, label
-
-            return HFDatasetWrapper(ds, image_key, label_key, transform,
+            print(f"  Loaded {task_name} via HuggingFace: {len(ds)} samples")
+            return HFDatasetWrapper(ds, img_key, lbl_key, transform,
                                     n_samples)
 
+        # --- Structured tasks with special label extraction ---
+
+        if task_name == 'clevr_count':
+            # CLEVR counting: label = number of objects (capped at 10)
+            try:
+                ds = load_dataset('clevr', split='train',
+                                  trust_remote_code=True)
+                def count_label(item):
+                    # CLEVR objects stored in metadata
+                    if 'objects' in item and 'size' in item['objects']:
+                        count = len(item['objects']['size'])
+                    elif 'question' in item:
+                        count = 5  # fallback
+                    else:
+                        count = min(len(item.get('objects', [])), 10)
+                    return min(count, 7)  # bin to 0-7 (8 classes)
+
+                print(f"  Loaded clevr_count via HuggingFace: {len(ds)} samples")
+                return HFDatasetWrapper(ds, 'image', None, transform,
+                                        n_samples, label_fn=count_label)
+            except Exception as e:
+                print(f"  CLEVR HF load failed: {e}")
+
+        if task_name == 'smallnorb_azi':
+            try:
+                ds = load_dataset('smallnorb', split='train',
+                                  trust_remote_code=True)
+                def azimuth_label(item):
+                    return item['label_azimuth']  # 0-17 (18 classes)
+
+                print(f"  Loaded smallnorb via HuggingFace: {len(ds)} samples")
+                return HFDatasetWrapper(ds, 'image', None, transform,
+                                        n_samples, label_fn=azimuth_label)
+            except Exception as e:
+                print(f"  SmallNORB HF load failed: {e}")
+
+        if task_name == 'smallnorb_ele':
+            try:
+                ds = load_dataset('smallnorb', split='train',
+                                  trust_remote_code=True)
+                def elevation_label(item):
+                    return item['label_elevation']  # 0-8 (9 classes)
+
+                print(f"  Loaded smallnorb (elevation) via HuggingFace: {len(ds)} samples")
+                return HFDatasetWrapper(ds, 'image', None, transform,
+                                        n_samples, label_fn=elevation_label)
+            except Exception as e:
+                print(f"  SmallNORB HF load failed: {e}")
+
+        if task_name == 'dsprites_loc':
+            try:
+                ds = load_dataset('dsprites', split='train',
+                                  trust_remote_code=True)
+                def loc_label(item):
+                    # Bin x-position into 16 classes
+                    x_pos = item.get('label_x_position',
+                                    item.get('value_x_position', 0.5))
+                    return min(int(x_pos * 16), 15)
+
+                print(f"  Loaded dsprites via HuggingFace: {len(ds)} samples")
+                return HFDatasetWrapper(ds, 'image', None, transform,
+                                        n_samples, label_fn=loc_label)
+            except Exception as e:
+                print(f"  dSprites HF load failed: {e}")
+
+        if task_name == 'dsprites_ori':
+            try:
+                ds = load_dataset('dsprites', split='train',
+                                  trust_remote_code=True)
+                def ori_label(item):
+                    ori = item.get('label_orientation',
+                                  item.get('value_orientation', 0.0))
+                    return min(int(ori * 16 / (2 * 3.14159)), 15)
+
+                print(f"  Loaded dsprites (orientation) via HuggingFace: {len(ds)} samples")
+                return HFDatasetWrapper(ds, 'image', None, transform,
+                                        n_samples, label_fn=ori_label)
+            except Exception as e:
+                print(f"  dSprites HF load failed: {e}")
+
+        if task_name == 'dmlab':
+            try:
+                ds = load_dataset('vtab/dmlab', split='train',
+                                  trust_remote_code=True)
+                print(f"  Loaded dmlab via HuggingFace: {len(ds)} samples")
+                return HFDatasetWrapper(ds, 'image', 'label', transform,
+                                        n_samples)
+            except Exception as e:
+                print(f"  DMLab HF load failed: {e}")
+
+    except ImportError:
+        print("  HuggingFace datasets not installed. pip install datasets")
     except Exception as e:
         print(f"  HuggingFace load failed for {task_name}: {e}")
 
+    print(f"  WARNING: No real dataset found for {task_name}")
     return None
 
 
@@ -346,8 +455,8 @@ def run_spectral_analysis(config: ExperimentConfig):
     all_alphas = {'natural': [], 'specialized': [], 'structured': []}
 
     # Select representative tasks (one per subcategory for speed)
-    tasks_to_run = ['cifar100', 'dtd', 'eurosat', 'clevr_count',
-                    'dsprites_loc', 'svhn', 'patch_camelyon', 'smallnorb_azi']
+    tasks_to_run = ['cifar100', 'dtd', 'svhn', 'eurosat', 'patch_camelyon',
+                    'gtsrb', 'clevr_count', 'dsprites_loc', 'smallnorb_azi']
 
     for task_name in tasks_to_run:
         print(f"\n{'='*50}")
@@ -367,18 +476,19 @@ def run_spectral_analysis(config: ExperimentConfig):
             'clevr_count': 8, 'clevr_dist': 6, 'dmlab': 6,
             'kitti': 4, 'dsprites_loc': 16, 'dsprites_ori': 16,
             'smallnorb_azi': 18, 'smallnorb_ele': 9,
-            'diabetic_retinopathy': 5,
+            'diabetic_retinopathy': 5, 'gtsrb': 43,
         }
         n_classes = n_classes_map.get(task_name, 10)
         category = config.task_category(task_name)
         task_type = 'structured' if category == 'structured' else 'natural'
 
-        # Create dataset — use MORE data for FFT (spectral analysis needs good ΔW*)
+        # Create dataset — use ALL available data for FFT (spectral analysis needs good ΔW*)
         dataset = load_real_dataset(task_name, n_classes, config,
                                     max_samples=config.n_train_fft)
         if dataset is None:
             print(f"  Falling back to synthetic data for {task_name}")
-            dataset = SyntheticVTABDataset(config.n_train_fft, n_classes,
+            n_synth = config.n_train_fft if config.n_train_fft > 0 else 5000
+            dataset = SyntheticVTABDataset(n_synth, n_classes,
                                            config.img_size, task_type)
         else:
             print(f"  Loaded real dataset: {len(dataset)} samples")

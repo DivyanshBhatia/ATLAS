@@ -224,7 +224,8 @@ def run_selection_benchmark(config: ExperimentConfig):
 
     pretrained_state = {k: v.cpu().clone() for k, v in base_model.state_dict().items()}
 
-    tasks = {'cifar100': 100, 'dtd': 47, 'clevr_count': 8, 'eurosat': 10}
+    tasks = {'cifar100': 100, 'dtd': 47, 'gtsrb': 43,
+             'clevr_count': 8, 'eurosat': 10}
     all_results = {}
 
     for task_name, n_classes in tasks.items():
@@ -254,14 +255,18 @@ def run_selection_benchmark(config: ExperimentConfig):
                                               config.img_size, task_type)
 
         # Split train into pilot + actual
-        n_pilot = config.n_train // 4
+        n_total_train = len(train_ds)
+        n_pilot = max(n_total_train // 4, 100)  # at least 100 for pilot
+        n_actual = n_total_train - n_pilot
         pilot_ds = Subset(train_ds, range(n_pilot))
-        actual_ds = Subset(train_ds, range(n_pilot, config.n_train))
+        actual_ds = Subset(train_ds, range(n_pilot, n_total_train))
+
+        print(f"  Data split: {n_pilot} pilot, {n_actual} train, {len(val_ds)} val")
 
         pilot_loader = DataLoader(pilot_ds, batch_size=config.batch_size,
-                                   shuffle=True, num_workers=0)
+                                   shuffle=True, num_workers=2)
         train_loader = DataLoader(actual_ds, batch_size=config.batch_size,
-                                   shuffle=True, num_workers=0)
+                                   shuffle=True, num_workers=2)
         val_loader = DataLoader(val_ds, batch_size=config.batch_size,
                                 shuffle=False, num_workers=0)
 

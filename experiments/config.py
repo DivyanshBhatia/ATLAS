@@ -53,6 +53,7 @@ class ExperimentConfig:
     vtab_structured: List[str] = field(default_factory=lambda: [
         "clevr_count", "clevr_dist", "dmlab", "kitti",
         "dsprites_loc", "dsprites_ori", "smallnorb_azi", "smallnorb_ele",
+        "gtsrb",  # German Traffic Signs — available via torchvision
     ])
 
     # PEFT configurations
@@ -62,8 +63,10 @@ class ExperimentConfig:
     adapter_dims: List[int] = field(default_factory=lambda: [4, 8, 16, 32, 64])
 
     # Training
-    n_train: int = 1000        # VTAB-1K protocol for PEFT comparison
-    n_train_fft: int = 5000    # More data for FFT spectral analysis
+    n_train: int = 1000        # Default for single-scale experiments
+    n_train_fft: int = 0       # 0 = use ALL available data for FFT spectral analysis
+    n_train_scales: list = field(default_factory=lambda: [200, 500, 1000, 5000, 0])
+    # ^ 0 = full dataset. Tests Theorem 3 prediction: optimal method changes with n
     n_val: int = 200
     batch_size: int = 64
     lr: float = 1e-3
