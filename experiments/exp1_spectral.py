@@ -493,10 +493,11 @@ def run_spectral_analysis(config: ExperimentConfig):
         else:
             print(f"  Loaded real dataset: {len(dataset)} samples")
 
-        # Train/val split
+        # Train/val split — use 10% for val (not fixed 200 which is too few for large datasets)
         from torch.utils.data import random_split
         n_total = len(dataset)
-        n_val = min(config.n_val, n_total // 5)
+        n_val = max(200, n_total // 10)  # at least 200, up to 10% of data
+        n_val = min(n_val, 10000)         # cap at 10K to save compute
         n_train = n_total - n_val
         train_ds, val_ds = random_split(dataset, [n_train, n_val])
 
