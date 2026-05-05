@@ -62,7 +62,8 @@ class ExperimentConfig:
     adapter_dims: List[int] = field(default_factory=lambda: [4, 8, 16, 32, 64])
 
     # Training
-    n_train: int = 1000        # VTAB-1K protocol
+    n_train: int = 1000        # VTAB-1K protocol for PEFT comparison
+    n_train_fft: int = 5000    # More data for FFT spectral analysis
     n_val: int = 200
     batch_size: int = 64
     lr: float = 1e-3

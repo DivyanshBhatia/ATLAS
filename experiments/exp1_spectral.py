@@ -210,14 +210,19 @@ def extract_weight_shifts(model_pretrained_state, model_finetuned_state,
     return shifts
 
 
-def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig):
+def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig,
+                      max_samples: int = None):
     """
-    Load a real dataset for VTAB-1K experiments.
-    Tries HuggingFace datasets, then torchvision, then returns None for fallback.
-    Limits to config.n_train samples.
+    Load a real dataset for VTAB experiments.
+    Tries torchvision, then HuggingFace, then returns None for fallback.
+
+    Args:
+        max_samples: override for config.n_train (use more data for FFT/spectral)
     """
     from torchvision import transforms
     from torch.utils.data import Subset
+
+    n_samples = max_samples or config.n_train
 
     transform = transforms.Compose([
         transforms.Resize((config.img_size, config.img_size)),
@@ -233,31 +238,31 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig):
         if task_name == 'cifar100':
             ds = tv_datasets.CIFAR100(root='./data', train=True, download=True,
                                        transform=transform)
-            indices = torch.randperm(len(ds))[:config.n_train].tolist()
+            indices = torch.randperm(len(ds))[:n_samples].tolist()
             return Subset(ds, indices)
 
         elif task_name == 'svhn':
             ds = tv_datasets.SVHN(root='./data', split='train', download=True,
                                    transform=transform)
-            indices = torch.randperm(len(ds))[:config.n_train].tolist()
+            indices = torch.randperm(len(ds))[:n_samples].tolist()
             return Subset(ds, indices)
 
         elif task_name == 'dtd':
             ds = tv_datasets.DTD(root='./data', split='train', download=True,
                                   transform=transform)
-            indices = torch.randperm(len(ds))[:config.n_train].tolist()
+            indices = torch.randperm(len(ds))[:n_samples].tolist()
             return Subset(ds, indices)
 
         elif task_name == 'oxford_flowers102':
             ds = tv_datasets.Flowers102(root='./data', split='train', download=True,
                                          transform=transform)
-            indices = torch.randperm(len(ds))[:config.n_train].tolist()
+            indices = torch.randperm(len(ds))[:n_samples].tolist()
             return Subset(ds, indices)
 
         elif task_name == 'eurosat':
             ds = tv_datasets.EuroSAT(root='./data', download=True,
                                       transform=transform)
-            indices = torch.randperm(len(ds))[:config.n_train].tolist()
+            indices = torch.randperm(len(ds))[:n_samples].tolist()
             return Subset(ds, indices)
 
     except Exception as e:
@@ -309,7 +314,7 @@ def load_real_dataset(task_name: str, n_classes: int, config: ExperimentConfig):
                     return img, label
 
             return HFDatasetWrapper(ds, image_key, label_key, transform,
-                                    config.n_train)
+                                    n_samples)
 
     except Exception as e:
         print(f"  HuggingFace load failed for {task_name}: {e}")
@@ -368,11 +373,12 @@ def run_spectral_analysis(config: ExperimentConfig):
         category = config.task_category(task_name)
         task_type = 'structured' if category == 'structured' else 'natural'
 
-        # Create dataset — try real data first, fall back to synthetic
-        dataset = load_real_dataset(task_name, n_classes, config)
+        # Create dataset — use MORE data for FFT (spectral analysis needs good ΔW*)
+        dataset = load_real_dataset(task_name, n_classes, config,
+                                    max_samples=config.n_train_fft)
         if dataset is None:
             print(f"  Falling back to synthetic data for {task_name}")
-            dataset = SyntheticVTABDataset(config.n_train, n_classes,
+            dataset = SyntheticVTABDataset(config.n_train_fft, n_classes,
                                            config.img_size, task_type)
         else:
             print(f"  Loaded real dataset: {len(dataset)} samples")
