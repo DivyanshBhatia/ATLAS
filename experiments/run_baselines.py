@@ -216,6 +216,26 @@ def main():
     print("COMPARISON WITH EXISTING METHODS")
     print("=" * 70)
 
+    # Show what's in exp5
+    print(f"\n  Exp5 tasks available: {sorted(exp5.keys())}")
+    print(f"  Exp2 tasks available: {sorted(exp2.keys())}")
+    common = sorted(set(exp5.keys()) & set(exp2.keys()))
+    missing = sorted(set(exp2.keys()) - set(exp5.keys()))
+    print(f"  Common: {len(common)} tasks")
+    if missing:
+        print(f"  Missing from exp5 (will use LoRA_r8 fallback): {missing}")
+
+    # Theory-derived thresholds (print once)
+    L, d, d_h, n, sp = 12, 768, 64, 800, 5.0
+    c1, c4 = 6.0, 2.0
+    gamma_lp = (1/c1) * np.sqrt(L * d_h / (n * sp))
+    gamma_vpt = (1/c1) * np.sqrt(L * d / (2 * n * sp))
+    rho_min = c4 * gamma_vpt
+    r_star = max(1, min(32, int(2 * n * sp / (L * d_h))))
+    p_star = max(1, int(4 * n * sp / (L * d)))
+    print(f"\n  Theory thresholds: γ_LP={gamma_lp:.4f}, γ_VPT={gamma_vpt:.4f}, "
+          f"ρ_min={rho_min:.4f}, r*={r_star}, p*={p_star}")
+
     # Collect results for each selection strategy
     strategies = {
         'Always LP': {},
@@ -266,27 +286,33 @@ def main():
             gamma_lp = (1/c1) * np.sqrt(L * d_h / (n * sp))
             gamma_vpt = (1/c1) * np.sqrt(L * d / (2 * n * sp))
             rho_min = c4 * gamma_vpt
+            r_star = max(1, min(32, int(2 * n * sp / (L * d_h))))
+            p_star = max(1, int(4 * n * sp / (L * d)))
 
             if gap < gamma_lp:
                 atlas_method = 'LP'
+                decision = f"gap={gap:.3f} < γ_LP={gamma_lp:.3f} → LP"
             elif attn_var > rho_min and gap < gamma_vpt:
-                # VPT — pick best available
-                vpt_methods = {k: v['accuracy'] for k, v in m.items() if 'VPT' in k}
-                atlas_method = max(vpt_methods, key=vpt_methods.get) if vpt_methods else 'VPT_p1'
+                # VPT — use theory-derived p* (don't cheat with best VPT)
+                available_p = [1, 5, 10, 20, 50]
+                best_p = min(available_p, key=lambda p: abs(p - p_star))
+                atlas_method = f'VPT_p{best_p}'
+                decision = (f"ρ={attn_var:.3f} > ρ_min={rho_min:.3f} AND "
+                           f"gap={gap:.3f} < γ_VPT={gamma_vpt:.3f} → {atlas_method}")
             else:
                 # LoRA — pick r closest to r*
-                r_star = max(1, min(32, int(2 * n * sp / (L * d_h))))
-                available = [k for k in m if 'LoRA' in k]
-                if available:
-                    atlas_method = min(available,
-                                      key=lambda k: abs(int(k.split('_r')[1]) - r_star))
-                else:
-                    atlas_method = 'LoRA_r4'
+                available_r = [1, 2, 4, 8, 16, 32]
+                best_r = min(available_r, key=lambda r: abs(r - r_star))
+                atlas_method = f'LoRA_r{best_r}'
+                decision = f"default → {atlas_method} (r*={r_star})"
 
             atlas_acc = m.get(atlas_method, {}).get('accuracy', 0)
             strategies['ATLAS (ours)'][task_name] = atlas_acc
+            print(f"  ATLAS {task_name}: {decision} → {atlas_acc:.3f}")
         else:
-            strategies['ATLAS (ours)'][task_name] = lora8_acc  # fallback
+            # Task not in exp5 — flag it
+            print(f"  ATLAS {task_name}: NOT IN EXP5 — defaulting to LoRA_r8")
+            strategies['ATLAS (ours)'][task_name] = lora8_acc
 
         # Transferability metrics (need features from exp5)
         # Since we don't have raw features saved, use LP accuracy as proxy
