@@ -68,12 +68,17 @@ def load_clevr_local(config):
 
     if scene_file:
         print(f"  Using real labels from {scene_file}")
+        print(f"  Loading scene JSON (may take a moment)...")
         with open(scene_file) as f:
-            scenes = json.load(f)['scenes']
+            scene_data = json.load(f)
+        scenes = scene_data['scenes']
+        del scene_data  # free ~1.5GB
+
         name_to_count = {}
         for s in scenes:
             count = min(len(s['objects']), 7)  # 0-7 = 8 classes
             name_to_count[s['image_filename']] = count
+        del scenes  # free more memory
 
         # Filter images that have scene data
         valid_images = [p for p in all_images
@@ -91,11 +96,11 @@ def load_clevr_local(config):
         valid_images = all_images
         name_to_count = {os.path.basename(p): hash(p) % 8 for p in all_images}
 
-    # Use up to 5000 images
+    # Use up to 2000 images (plenty for metrics, saves RAM)
     import random
     random.seed(42)
     random.shuffle(valid_images)
-    valid_images = valid_images[:5000]
+    valid_images = valid_images[:2000]
 
     class CLEVRDataset(torch.utils.data.Dataset):
         def __init__(self, paths, tfm, n2c):
@@ -130,12 +135,15 @@ def main():
 
     print(f"  Total samples: {len(dataset)}")
 
-    loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=2)
+    import gc
+    gc.collect()  # free any leftover memory from data loading
 
-    # Extract features and attention
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=0)
+
+    # Extract features and attention (fewer attention batches to save RAM)
     print("\nExtracting features and attention maps...")
     features, labels, attention = extract_features_and_attention(
-        model, loader, device, max_attn_batches=80)
+        model, loader, device, max_attn_batches=30)  # 30×64=1920 for attention
     print(f"  Features: {features.shape[0]} samples, {features.shape[1]}d")
     print(f"  Unique labels: {np.unique(labels)}")
 
