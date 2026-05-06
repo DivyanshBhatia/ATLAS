@@ -38,6 +38,18 @@ def run_single_seed(task_name, n_classes, base_model, config, device, seed):
     if dataset is None:
         return None
 
+    # Fix EMNIST labels (1-indexed → 0-indexed)
+    if 'emnist' in task_name:
+        class LabelFixDataset(torch.utils.data.Dataset):
+            def __init__(self, ds):
+                self.ds = ds
+            def __len__(self):
+                return len(self.ds)
+            def __getitem__(self, idx):
+                img, label = self.ds[idx]
+                return img, label - 1 if label > 0 else label
+        dataset = LabelFixDataset(dataset)
+
     n_total = len(dataset)
     n_val = min(200, n_total // 5)
     n_train = n_total - n_val
