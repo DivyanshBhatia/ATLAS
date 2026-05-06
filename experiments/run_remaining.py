@@ -42,6 +42,12 @@ def load_remaining_task(task_name, config):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
+    if task_name == 'emnist_digits':
+        ds = datasets.EMNIST(root='./data', split='digits', train=True,
+                             download=True, transform=gray_transform)
+        indices = torch.randperm(len(ds))[:1000].tolist()
+        return Subset(ds, indices), 10
+
     if task_name == 'emnist_letters':
         # EMNIST letters: labels are 1-26, need to map to 0-25
         ds = datasets.EMNIST(root='./data', split='letters', train=True,
@@ -306,6 +312,14 @@ def run_task(task_name, n_classes, category, base_model, config, device):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--task', type=str, default=None,
+                        help='Run a single task (e.g., --task clevr_count)')
+    parser.add_argument('--force', action='store_true',
+                        help='Re-run even if results already exist')
+    args = parser.parse_args()
+
     config = ExperimentConfig()
     device = setup_device()
     ensure_dirs(config)
@@ -323,8 +337,9 @@ def main():
     else:
         all_results = {}
 
-    # Tasks that need (re)running
+    # All remaining/extra tasks
     remaining_tasks = {
+        'emnist_digits':   (10,  'structured'),
         'emnist_letters':  (26,  'structured'),
         'rendered_sst2':   (2,   'structured'),
         'clevr_count':     (8,   'structured'),
@@ -333,9 +348,18 @@ def main():
         'stanford_cars':   (196, 'natural'),
     }
 
+    # Filter to single task if specified
+    if args.task:
+        if args.task in remaining_tasks:
+            remaining_tasks = {args.task: remaining_tasks[args.task]}
+        else:
+            print(f"Unknown task: {args.task}")
+            print(f"Available: {', '.join(remaining_tasks.keys())}")
+            return
+
     for task_name, (n_classes, category) in remaining_tasks.items():
-        if task_name in all_results:
-            print(f"\n  {task_name}: already have results, skipping")
+        if task_name in all_results and not args.force:
+            print(f"\n  {task_name}: already have results, skipping (use --force to re-run)")
             continue
 
         print(f"\n{'='*60}")
