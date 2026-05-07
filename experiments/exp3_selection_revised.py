@@ -184,7 +184,7 @@ class TrainingFreeSelector:
         }
 
 
-def run_selection_benchmark(config: ExperimentConfig):
+def run_selection_benchmark(config: ExperimentConfig, task_filter=None):
     """Benchmark the training-free selection algorithm."""
     print("=" * 70)
     print("EXPERIMENT 3: SELECTION ALGORITHM (Training-Free)")
@@ -217,7 +217,20 @@ def run_selection_benchmark(config: ExperimentConfig):
         'clevr_count': (8, 'structured'),
     }
 
+    if task_filter:
+        if task_filter in tasks:
+            tasks = {task_filter: tasks[task_filter]}
+        else:
+            print(f"Unknown task: {task_filter}. Available: {list(tasks.keys())}")
+            return {}
+
+    # Load existing results to merge
+    results_path = os.path.join(config.output_dir, 'exp3_selection_revised.json')
     all_results = {}
+    if os.path.exists(results_path):
+        with open(results_path) as f:
+            all_results = json.load(f)
+        print(f"Loaded {len(all_results)} existing results")
 
     for task_name, (n_classes, category) in tasks.items():
         print(f"\n{'='*60}")
@@ -389,5 +402,11 @@ def run_selection_benchmark(config: ExperimentConfig):
 
 
 if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--task', type=str, default=None,
+                        help='Run single task (e.g., --task gtsrb)')
+    args = parser.parse_args()
+
     config = ExperimentConfig()
-    run_selection_benchmark(config)
+    run_selection_benchmark(config, task_filter=args.task)
