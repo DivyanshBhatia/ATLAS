@@ -101,18 +101,14 @@ class TrainingFreeSelector:
 
         return self.task_metrics
 
-    def select(self, n_train):
+    def select(self, n_train, n_classes=None):
         """
-        Phase 2: Select method + capacity using theory-derived thresholds.
+        Phase 2: Select method + capacity.
 
-        From Theorem 5 (Revised):
-          γ_LP  = (1/c₁) · √(L·d_h / (n·σ_P²))
-          γ_VPT = (1/c₁) · √(L·d / (2n·σ_P²))
-          ρ_min = c₄ · γ_VPT
-
-        Capacity from Theorem 3 (KL < 2n):
-          r* = ⌊2n·σ_P² / (L·d_h)⌋
-          p* = ⌊4n·σ_P² / (L·d)⌋
+        Changes from v1:
+        1. Removed LP branch (LoRA_r1 is equally cheap and usually better)
+        2. Capacity scales with gap (hard tasks need more rank)
+        3. VPT score-based selection (ratio of attn_var to gap)
         """
         gap = self.task_metrics['feature_gap']
         attn_var = self.task_metrics['attention_variance']
@@ -122,47 +118,48 @@ class TrainingFreeSelector:
         d_h = self.config.head_dim
         sigma_p_sq = self.sigma_p_sq
 
-        # PAC-Bayes tightness constant (standard, see McAllester 2003)
+        # PAC-Bayes constants
         c1 = 6.0
-        # Pretrained→optimal attention gap factor
         c4 = 2.0
 
-        # Theory-derived thresholds
-        gamma_lp = (1.0 / c1) * np.sqrt(L * d_h / (n_train * sigma_p_sq))
+        # Theory-derived CEILING (max affordable capacity)
+        r_max = max(1, int(2 * n_train * sigma_p_sq / (L * d_h)))
+        p_max = max(1, int(4 * n_train * sigma_p_sq / (L * d)))
+
+        # Task-dependent capacity: scale by gap
+        # Higher gap → needs more adaptation → use more of the capacity budget
+        # gap=0.02 → use 10% of budget, gap=0.6 → use 300% (beyond ceiling for hard tasks)
+        r_task = max(1, round(r_max * gap / 0.2))
+        r_task = min(r_task, 32)  # hardware ceiling
+        p_task = max(1, round(p_max * max(gap, 0.05) / 0.1))
+        p_task = min(p_task, 50)
+
+        # VPT score: ratio of attention steering potential to feature gap cost
+        # High score = VPT has advantage; Low score = LoRA has advantage
+        vpt_score = attn_var / (gap + 0.01)
+
+        # Theory-derived VPT threshold (from Theorem 1 crossover)
         gamma_vpt = (1.0 / c1) * np.sqrt(L * d / (2 * n_train * sigma_p_sq))
         rho_min = c4 * gamma_vpt
 
-        # Theory-derived capacity (from KL < 2n)
-        r_star = max(1, int(2 * n_train * sigma_p_sq / (L * d_h)))
-        p_star = max(1, int(4 * n_train * sigma_p_sq / (L * d)))
+        print(f"  [Thresholds] r_max={r_max}, p_max={p_max}")
+        print(f"  [Capacity]   r_task={r_task}, p_task={p_task}")
+        print(f"  [Task]       γ={gap:.4f}, ρ={attn_var:.4f}, VPT_score={vpt_score:.2f}")
 
-        print(f"  [Thresholds] γ_LP={gamma_lp:.4f}, γ_VPT={gamma_vpt:.4f}, "
-              f"ρ_min={rho_min:.4f}")
-        print(f"  [Capacity]   r*={r_star}, p*={p_star}")
-        print(f"  [Task]       γ={gap:.4f}, ρ={attn_var:.4f}")
-
-        # Method selection (Theorem 5)
-        if gap < gamma_lp:
-            method = 'LP'
-            capacity = None
-            reason = f"γ={gap:.3f} < γ_LP={gamma_lp:.3f} → features sufficient"
-
-        elif attn_var > rho_min and gap < gamma_vpt:
+        # Method selection
+        if attn_var > rho_min and gap < gamma_vpt and vpt_score > 3.0:
             method = 'VPT'
-            capacity = p_star
-            reason = (f"ρ={attn_var:.3f} > ρ_min={rho_min:.3f} AND "
-                     f"γ={gap:.3f} < γ_VPT={gamma_vpt:.3f} → VPT(p*={p_star})")
-
+            capacity = p_task
+            reason = (f"VPT_score={vpt_score:.1f} > 3.0 AND ρ={attn_var:.3f} > ρ_min={rho_min:.3f}"
+                     f" AND γ={gap:.3f} < γ_VPT={gamma_vpt:.3f} → VPT(p={capacity})")
         else:
             method = 'LoRA'
-            capacity = r_star
-            reason = f"default → LoRA(r*={r_star})"
+            capacity = r_task
+            reason = f"LoRA(r={capacity}) [gap-scaled from r_max={r_max}]"
 
         # Round to nearest available config
-        if method == 'LP':
-            method_name = 'LP'
-        elif method == 'VPT':
-            available_p = [1, 5, 10, 20, 50, 100]
+        if method == 'VPT':
+            available_p = [1, 5, 10, 20, 50]
             capacity = min(available_p, key=lambda p: abs(p - capacity))
             method_name = f'VPT_p{capacity}'
         else:
@@ -178,11 +175,11 @@ class TrainingFreeSelector:
             'reason': reason,
             'feature_gap': gap,
             'attention_variance': attn_var,
-            'gamma_lp': gamma_lp,
-            'gamma_vpt': gamma_vpt,
-            'rho_min': rho_min,
-            'r_star': r_star,
-            'p_star': p_star,
+            'vpt_score': vpt_score,
+            'r_max': r_max,
+            'r_task': r_task,
+            'p_max': p_max,
+            'p_task': p_task,
             'sigma_p_sq': sigma_p_sq,
         }
 

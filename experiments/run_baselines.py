@@ -283,34 +283,33 @@ def main():
             # Theory-derived thresholds
             L, d, d_h, n, sp = 12, 768, 64, 800, 5.0
             c1, c4 = 6.0, 2.0
-            gamma_lp = (1/c1) * np.sqrt(L * d_h / (n * sp))
             gamma_vpt = (1/c1) * np.sqrt(L * d / (2 * n * sp))
             rho_min = c4 * gamma_vpt
-            r_star = max(1, min(32, int(2 * n * sp / (L * d_h))))
-            p_star = max(1, int(4 * n * sp / (L * d)))
+            r_max = max(1, int(2 * n * sp / (L * d_h)))
+            p_max = max(1, int(4 * n * sp / (L * d)))
 
-            if gap < gamma_lp:
-                atlas_method = 'LP'
-                decision = f"gap={gap:.3f} < γ_LP={gamma_lp:.3f} → LP"
-            elif attn_var > rho_min and gap < gamma_vpt:
-                # VPT — use theory-derived p* (don't cheat with best VPT)
+            # Task-dependent capacity (gap-scaled)
+            r_task = max(1, min(32, round(r_max * gap / 0.2)))
+            p_task = max(1, min(50, round(p_max * max(gap, 0.05) / 0.1)))
+
+            # VPT score
+            vpt_score = attn_var / (gap + 0.01)
+
+            if attn_var > rho_min and gap < gamma_vpt and vpt_score > 3.0:
                 available_p = [1, 5, 10, 20, 50]
-                best_p = min(available_p, key=lambda p: abs(p - p_star))
+                best_p = min(available_p, key=lambda p: abs(p - p_task))
                 atlas_method = f'VPT_p{best_p}'
-                decision = (f"ρ={attn_var:.3f} > ρ_min={rho_min:.3f} AND "
-                           f"gap={gap:.3f} < γ_VPT={gamma_vpt:.3f} → {atlas_method}")
+                decision = f"VPT_score={vpt_score:.1f}>3, p={best_p}"
             else:
-                # LoRA — pick r closest to r*
                 available_r = [1, 2, 4, 8, 16, 32]
-                best_r = min(available_r, key=lambda r: abs(r - r_star))
+                best_r = min(available_r, key=lambda r: abs(r - r_task))
                 atlas_method = f'LoRA_r{best_r}'
-                decision = f"default → {atlas_method} (r*={r_star})"
+                decision = f"LoRA_r{best_r} (gap-scaled from r_max={r_max})"
 
             atlas_acc = m.get(atlas_method, {}).get('accuracy', 0)
             strategies['ATLAS (ours)'][task_name] = atlas_acc
             print(f"  ATLAS {task_name}: {decision} → {atlas_acc:.3f}")
         else:
-            # Task not in exp5 — flag it
             print(f"  ATLAS {task_name}: NOT IN EXP5 — defaulting to LoRA_r8")
             strategies['ATLAS (ours)'][task_name] = lora8_acc
 
