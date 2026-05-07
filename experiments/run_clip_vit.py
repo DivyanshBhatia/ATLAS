@@ -310,6 +310,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp', type=str, default='all',
                         choices=['task_structure', 'comparison', 'all'])
+    parser.add_argument('--task', type=str, default=None,
+                        help='Run single task (e.g., --task svhn)')
     args = parser.parse_args()
 
     device = setup_device()
@@ -350,6 +352,15 @@ def main():
     print(f"  γ_VPT = {(1/c1) * np.sqrt(12*768/(2*800*dino_sp)):.4f}")
 
     all_results = {'model': CLIP_MODEL, 'sigma_p_sq': sigma_p_sq}
+
+    # Filter to single task if specified
+    global TASKS
+    if args.task:
+        if args.task in TASKS:
+            TASKS = {args.task: TASKS[args.task]}
+        else:
+            print(f"Unknown task: {args.task}. Available: {list(TASKS.keys())}")
+            return
 
     if args.exp in ('task_structure', 'all'):
         ts_results = run_task_structure(model, device)
