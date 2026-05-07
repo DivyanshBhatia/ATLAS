@@ -323,7 +323,7 @@ def main():
     config.head_dim = SUP_HEAD_DIM
 
     print(f"Loading {SUP_MODEL}...")
-    model = timm.create_model(SUP_MODEL, pretrained=True, img_size=SUP_IMG_SIZE)
+    model = timm.create_model(SUP_MODEL, pretrained=True, img_size=SUP_IMG_SIZE).to(device)
 
     sigma_p_sq = compute_sigma_p_sq(model)
     print(f"σ_P² = {sigma_p_sq:.4f}")
