@@ -181,28 +181,77 @@ it gets more "capacity per KL bit" than VPT.
 
 ---
 
-## Theorem 5 (Revised Statement)
+## Theorem 5 (Revised Statement — Backbone-Aware Selection)
 
 **Theorem 5 (Training-Free PEFT Selection).** Let f_{θ₀} be a pretrained
 ViT with L layers, embed dimension d, head dimension d_h, and prior
 variance σ_P². Given n labeled samples from a downstream task:
 
 1. **Characterize** (one forward pass):
-   - γ = 1 - LP_accuracy(pretrained features)
+   - γ = 1 - LP_accuracy(pretrained features)  [feature gap]
    - ρ = attention_class_variance(pretrained attention maps)
 
-2. **Select method**:
-   - If γ < (1/c₁)·√(L·d_h/(n·σ_P²)): return LP
-   - If ρ > c₄/c₁ · √(L·d/(2n·σ_P²)) AND γ < (1/c₁)·√(L·d/(2n·σ_P²)):
-     return VPT with p* = ⌊4n·σ_P²/(L·d)⌋
-   - Else: return LoRA with r* = ⌊2n·σ_P²/(L·d_h)⌋
+2. **Compute backbone-dependent capacities**:
+   - r_max = ⌊2n·σ_P²/(L·d_h)⌋  [LoRA capacity ceiling]
+   - p_max = ⌊4n·σ_P²/(L·d)⌋    [VPT capacity ceiling]
 
-where c₁ ≈ 6 (PAC-Bayes tightness) and c₄ ≈ 2 (attention gap factor)
-are universal constants.
+3. **Compute task-dependent capacity** (gap-scaled):
+   - r_task = clip(⌊r_max × γ/0.2⌋, 1, 32)
+   - p_task = clip(⌈p_max × γ/0.1⌉, 1, 50)
+
+4. **Select method** (backbone-aware VPT score):
+   - S_VPT = ρ · p_max / (γ + ε)
+   - If S_VPT > τ AND ρ > ρ_min: return VPT(p_task)
+   - Else: return LoRA(r_task)
+
+where ρ_min = c₄/c₁ · √(L·d/(2n·σ_P²)), τ ≈ 3 (VPT score threshold),
+c₁ ≈ 6 (PAC-Bayes tightness), c₄ ≈ 2 (attention gap factor).
+
+### Key design choices and rationale:
+
+**No LP branch.** LoRA(r=1) is equally cheap and provides upside over LP
+on every task tested. Removing LP avoids misclassification of easy tasks.
+
+**Gap-scaled capacity.** The PAC-Bayes ceiling r_max gives the maximum
+affordable rank. The feature gap γ determines how much of that budget 
+the task needs: easy tasks (γ≈0.02) use r≈1, hard tasks (γ≈0.5) use
+r≈r_max. This prevents over-fitting on easy tasks and under-fitting
+on hard tasks.
+
+**Backbone-aware VPT score.** The VPT score multiplies attention class
+variance ρ by VPT capacity p_max:
+
+$$S_{\text{VPT}} = \frac{\rho \cdot p^*}{\gamma + \epsilon}$$
+
+Rationale: VPT's advantage requires BOTH (a) class-dependent attention
+patterns to steer (ρ) AND (b) enough affordable prompts to perform the
+steering (p*). When p*=1 (e.g., DINOv2 at n=800), even high ρ cannot
+be fully exploited. When p*=3 (e.g., supervised ViT-B), moderate ρ
+can yield meaningful VPT improvements.
+
+### Cross-backbone thresholds:
+
+| Backbone | σ_P² | r_max | p_max | γ_VPT | ρ_min |
+|----------|------|-------|-------|-------|-------|
+| DINOv2 ViT-B/14 | 5.08 | 10 | 1 | 0.178 | 0.355 |
+| Supervised ViT-B/16 | 9.90 | 20 | 3 | 0.127 | 0.254 |
+| CLIP ViT-B/16 | TBD | TBD | TBD | TBD | TBD |
+
+### Limitations
+
+The VPT score correctly predicts VPT advantage on tasks with high
+attention class variance (MNIST, FashionMNIST) across all backbones.
+However, it underestimates VPT's advantage on tasks where VPT can
+CREATE new attention patterns rather than STEER existing ones (e.g.,
+SVHN on supervised ViT-B). The attention_class_variance metric ρ
+captures steering potential from the pretrained model but not the
+potential for VPT to generate entirely new beneficial patterns on
+backbones with suboptimal attention. This is a known limitation of
+the training-free proxy.
 
 **Guarantee:** Under Theorems 1-3, the selected method achieves risk
-within O(1/√n) of the oracle, with selection cost = one forward pass
-(O(n) time, zero training).
+within O(1/√n) of the oracle on DINOv2, with selection cost = one
+forward pass (O(n) time, zero training).
 
 ---
 
@@ -215,5 +264,10 @@ $$\sigma_P^2 = \frac{1}{L \cdot M \cdot d_h} \sum_{l,m} \|W_0^{(l,m)}\|_F^2$$
 
 where M is the number of weight matrices per layer (qkv, proj, etc.).
 
-For DINOv2 ViT-B: σ_P² ≈ 5.08 (measured from pretrained checkpoint).
-This is a ONE-TIME computation per pretrained model.
+| Model | σ_P² | Interpretation |
+|-------|------|---------------|
+| DINOv2 ViT-B | 5.08 | Lower → tighter prior → less VPT capacity |
+| Supervised ViT-B | 9.90 | Higher → looser prior → more VPT capacity |
+| CLIP ViT-B | TBD | Expected between DINOv2 and supervised |
+
+This is a ONE-TIME computation per pretrained model (~1 second).

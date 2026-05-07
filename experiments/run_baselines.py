@@ -292,10 +292,10 @@ def main():
             r_task = max(1, min(32, round(r_max * gap / 0.2)))
             p_task = max(1, min(50, round(p_max * max(gap, 0.05) / 0.1)))
 
-            # VPT score
-            vpt_score = attn_var / (gap + 0.01)
+            # VPT score (backbone-aware: multiplied by p*)
+            vpt_score = attn_var * p_max / (gap + 0.01)
 
-            if attn_var > rho_min and gap < gamma_vpt and vpt_score > 3.0:
+            if attn_var > rho_min and vpt_score > 3.0:
                 available_p = [1, 5, 10, 20, 50]
                 best_p = min(available_p, key=lambda p: abs(p - p_task))
                 atlas_method = f'VPT_p{best_p}'

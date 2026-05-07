@@ -134,9 +134,10 @@ class TrainingFreeSelector:
         p_task = max(1, round(p_max * max(gap, 0.05) / 0.1))
         p_task = min(p_task, 50)
 
-        # VPT score: ratio of attention steering potential to feature gap cost
-        # High score = VPT has advantage; Low score = LoRA has advantage
-        vpt_score = attn_var / (gap + 0.01)
+        # VPT score: backbone-aware ratio of attention steering potential
+        # Multiplied by p_max because higher affordable VPT capacity
+        # amplifies VPT's advantage (Theorem 5, revised)
+        vpt_score = attn_var * p_max / (gap + 0.01)
 
         # Theory-derived VPT threshold (from Theorem 1 crossover)
         gamma_vpt = (1.0 / c1) * np.sqrt(L * d / (2 * n_train * sigma_p_sq))
@@ -144,14 +145,14 @@ class TrainingFreeSelector:
 
         print(f"  [Thresholds] r_max={r_max}, p_max={p_max}")
         print(f"  [Capacity]   r_task={r_task}, p_task={p_task}")
-        print(f"  [Task]       γ={gap:.4f}, ρ={attn_var:.4f}, VPT_score={vpt_score:.2f}")
+        print(f"  [Task]       γ={gap:.4f}, ρ={attn_var:.4f}, VPT_score={vpt_score:.2f} (p*={p_max})")
 
         # Method selection
-        if attn_var > rho_min and gap < gamma_vpt and vpt_score > 3.0:
+        if attn_var > rho_min and vpt_score > 3.0:
             method = 'VPT'
             capacity = p_task
-            reason = (f"VPT_score={vpt_score:.1f} > 3.0 AND ρ={attn_var:.3f} > ρ_min={rho_min:.3f}"
-                     f" AND γ={gap:.3f} < γ_VPT={gamma_vpt:.3f} → VPT(p={capacity})")
+            reason = (f"VPT_score={vpt_score:.1f}>3.0 (ρ={attn_var:.3f}×p*={p_max}"
+                     f"/(γ+ε)) → VPT(p={capacity})")
         else:
             method = 'LoRA'
             capacity = r_task
