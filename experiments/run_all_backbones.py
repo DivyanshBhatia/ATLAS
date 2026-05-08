@@ -63,12 +63,15 @@ TASKS = {
     'cifar100':     (100, 'natural'),
     'dtd':          (47,  'natural'),
     'fgvc_aircraft':(100, 'natural'),
+    'oxford_iiit_pet': (37, 'natural'),
+    'food101':      (101, 'natural'),
+    'stl10':        (10,  'natural'),
     'svhn':         (10,  'structured'),
     'gtsrb':        (43,  'structured'),
     'mnist':        (10,  'structured'),
     'fashionmnist': (10,  'structured'),
+    'rendered_sst2':(2,   'structured'),
     'eurosat':      (10,  'specialized'),
-    'pcam':         (2,   'specialized'),
 }
 
 
@@ -98,8 +101,11 @@ def load_dataset(task_name, img_size=224, max_samples=1000):
         'fashionmnist': lambda: datasets.FashionMNIST('./data', True, download=True, transform=gray),
         'eurosat': lambda: datasets.EuroSAT('./data', download=True, transform=rgb),
         'dtd': lambda: datasets.DTD('./data', split='train', download=True, transform=rgb),
-        'pcam': lambda: datasets.PCAM('./data', split='train', download=True, transform=rgb),
         'fgvc_aircraft': lambda: datasets.FGVCAircraft('./data', split='train', download=True, transform=rgb),
+        'oxford_iiit_pet': lambda: datasets.OxfordIIITPet('./data', split='trainval', download=True, transform=rgb),
+        'food101': lambda: datasets.Food101('./data', split='train', download=True, transform=rgb),
+        'stl10': lambda: datasets.STL10('./data', split='train', download=True, transform=rgb),
+        'rendered_sst2': lambda: datasets.RenderedSST2('./data', split='train', download=True, transform=rgb),
     }
     ds = loaders[task_name]()
     if len(ds) > max_samples:
