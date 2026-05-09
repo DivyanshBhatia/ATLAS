@@ -35,134 +35,135 @@ from config import setup_device
 from run_all_backbones import BACKBONES, get_transforms, load_dataset
 
 
-class AttentionExtractor:
-    """Hook-based attention extraction."""
-    def __init__(self, model):
-        self.attentions = []
-        self.hooks = []
-        for block in model.blocks:
-            hook = block.attn.register_forward_hook(self._make_hook())
-            self.hooks.append(hook)
+def measure_perturbation_simple(model, loader, device, num_prompts=5, max_batches=10):
+    """
+    Model-agnostic attention perturbation measurement.
+    Instead of rebuilding forward_features, we hook into each block's input
+    and prepend random tokens. Works for ALL models (incl. register models, DeiT).
+    """
+    model.eval()
+    embed_dim = model.embed_dim
+    num_layers = len(model.blocks)
 
-    def _make_hook(self):
+    # ---- Pass 1: Normal forward, extract attention ----
+    attn_base_all = [[] for _ in range(num_layers)]
+
+    def make_attn_hook(layer_idx, storage):
         def hook_fn(module, input, output):
             B, N, C = input[0].shape
             H = module.num_heads
             d = C // H
             qkv = module.qkv(input[0]).reshape(B, N, 3, H, d).permute(2, 0, 3, 1, 4)
             attn = F.softmax((qkv[0] @ qkv[1].transpose(-2, -1)) * (d ** -0.5), dim=-1)
-            self.attentions.append(attn.detach())
+            # CLS→all attention (row 0)
+            storage[layer_idx].append(attn[:, :, 0, :].detach().cpu())
         return hook_fn
 
-    def clear(self):
-        self.attentions = []
+    hooks = []
+    for i, block in enumerate(model.blocks):
+        hooks.append(block.attn.register_forward_hook(make_attn_hook(i, attn_base_all)))
 
-    def remove(self):
-        for h in self.hooks:
-            h.remove()
+    with torch.no_grad():
+        for bi, (bx, _) in enumerate(loader):
+            if bi >= max_batches:
+                break
+            model.forward_features(bx.to(device))
 
+    for h in hooks:
+        h.remove()
 
-class VPTWrapper(nn.Module):
-    """Minimal VPT wrapper that prepends learnable prompts."""
-    def __init__(self, base_model, num_prompts, embed_dim, num_layers=12, random_init=True):
-        super().__init__()
-        self.base_model = base_model
-        self.num_prompts = num_prompts
-        self.prompts = nn.ParameterList([
-            nn.Parameter(torch.randn(1, num_prompts, embed_dim) * 0.02)
-            for _ in range(num_layers)
-        ])
-        # Freeze base model
-        for p in self.base_model.parameters():
-            p.requires_grad_(False)
+    # ---- Pass 2: Inject random prompts at each block input via hooks ----
+    attn_prompted_all = [[] for _ in range(num_layers)]
+    random_prompts = [torch.randn(1, num_prompts, embed_dim, device=device) * 0.02
+                      for _ in range(num_layers)]
 
-    def forward_features(self, x):
-        """Modified forward that injects prompts at each layer."""
-        x = self.base_model.patch_embed(x)
-        cls_token = self.base_model.cls_token.expand(x.shape[0], -1, -1)
-        x = torch.cat([cls_token, x], dim=1)
-        x = x + self.base_model.pos_embed
+    def make_inject_hook(layer_idx):
+        """Hook that prepends random tokens to block input."""
+        def hook_fn(module, args):
+            x = args[0]  # [B, N, d]
+            prompt = random_prompts[layer_idx].expand(x.shape[0], -1, -1)
+            x_new = torch.cat([x[:, :1], prompt, x[:, 1:]], dim=1)
+            return (x_new,) + args[1:]  # Replace input
+        return hook_fn
 
-        for i, block in enumerate(self.base_model.blocks):
-            # Prepend prompts
-            prompt = self.prompts[i].expand(x.shape[0], -1, -1)
-            x_with_prompts = torch.cat([x[:, :1], prompt, x[:, 1:]], dim=1)
-            x_out = block(x_with_prompts)
-            # Remove prompts for next layer
-            x = torch.cat([x_out[:, :1], x_out[:, self.num_prompts+1:]], dim=1)
+    def make_remove_hook(layer_idx, np_):
+        """Hook on block output to remove prompt tokens."""
+        def hook_fn(module, input, output):
+            # Remove the injected prompts from output
+            return torch.cat([output[:, :1], output[:, np_+1:]], dim=1)
+        return hook_fn
 
-        return x
+    inject_hooks = []
+    remove_hooks = []
+    attn_hooks = []
+    for i, block in enumerate(model.blocks):
+        inject_hooks.append(block.register_forward_pre_hook(make_inject_hook(i)))
+        remove_hooks.append(block.register_forward_hook(make_remove_hook(i, num_prompts)))
+        attn_hooks.append(block.attn.register_forward_hook(
+            make_attn_hook(i, attn_prompted_all)))
 
+    with torch.no_grad():
+        for bi, (bx, _) in enumerate(loader):
+            if bi >= max_batches:
+                break
+            model.forward_features(bx.to(device))
 
-def compute_attention_divergence(attn_base, attn_prompted, eps=1e-10):
-    """
-    Compute multiple divergence measures between base and prompted attention.
-    Input: attn_base, attn_prompted: lists of [B, H, N, N] tensors per layer
-    """
+    for h in inject_hooks + remove_hooks + attn_hooks:
+        h.remove()
+
+    # ---- Compute divergences ----
     results_per_layer = []
-    
-    for l, (a0, ap) in enumerate(zip(attn_base, attn_prompted)):
-        # CLS token attention (row 0) — most relevant for classification
-        # a0: [B, H, N_base, N_base], ap: [B, H, N_prompted, N_prompted]
-        # We need to extract CLS→patch attention (excluding prompt tokens)
-        
-        # For base model: CLS is token 0, patches are tokens 1:
-        cls_attn_base = a0[:, :, 0, 1:]  # [B, H, N_patches]
-        
-        # For prompted model: CLS is token 0, prompts are 1:p+1, patches are p+1:
-        n_prompts = ap.shape[2] - a0.shape[2]
-        if n_prompts > 0:
-            cls_attn_prompted = ap[:, :, 0, n_prompts+1:]  # [B, H, N_patches]
-            # Renormalize to sum to 1 over patches only
-            cls_attn_prompted = cls_attn_prompted / (cls_attn_prompted.sum(-1, keepdim=True) + eps)
-        else:
-            cls_attn_prompted = ap[:, :, 0, 1:]
+    eps = 1e-10
 
-        # Normalize base attention
-        cls_attn_base = cls_attn_base / (cls_attn_base.sum(-1, keepdim=True) + eps)
+    for l in range(num_layers):
+        if not attn_base_all[l] or not attn_prompted_all[l]:
+            continue
+
+        a0 = torch.cat(attn_base_all[l], dim=0)   # [total_B, H, N_base]
+        ap = torch.cat(attn_prompted_all[l], dim=0) # [total_B, H, N_prompted]
+
+        # Extract CLS→patch attention (skip CLS self-attention, skip prompts)
+        # Base: CLS attn to patches = columns 1: (skip col 0 = CLS self)
+        p0 = a0[:, :, 1:]
+        # Prompted: CLS attn to patches = columns after CLS and prompts
+        pp_raw = ap[:, :, num_prompts+1:]
 
         # Truncate to same length
-        min_len = min(cls_attn_base.shape[-1], cls_attn_prompted.shape[-1])
-        p0 = cls_attn_base[:, :, :min_len] + eps
-        pp = cls_attn_prompted[:, :, :min_len] + eps
-        
+        min_len = min(p0.shape[-1], pp_raw.shape[-1])
+        p0 = p0[:, :, :min_len].float() + eps
+        pp = pp_raw[:, :, :min_len].float() + eps
+
         # Renormalize
         p0 = p0 / p0.sum(-1, keepdim=True)
         pp = pp / pp.sum(-1, keepdim=True)
 
-        # KL(prompted || base) — how much prompts change the attention
+        # KL(prompted || base)
         kl = (pp * (pp.log() - p0.log())).sum(-1).mean().item()
-        
-        # Symmetric KL (Jensen-Shannon)
+
+        # Jensen-Shannon
         m = 0.5 * (p0 + pp)
         js = 0.5 * (p0 * (p0.log() - m.log())).sum(-1).mean().item() + \
              0.5 * (pp * (pp.log() - m.log())).sum(-1).mean().item()
-        
-        # L2 distance
+
+        # L2
         l2 = ((p0 - pp) ** 2).sum(-1).mean().item()
-        
+
         # Total variation
         tv = 0.5 * (p0 - pp).abs().sum(-1).mean().item()
 
         results_per_layer.append({
-            'layer': l,
-            'kl_divergence': kl,
-            'js_divergence': js,
-            'l2_distance': l2,
-            'total_variation': tv,
+            'layer': l, 'kl_divergence': kl, 'js_divergence': js,
+            'l2_distance': l2, 'total_variation': tv,
         })
 
-    # Aggregate across layers
     mean_kl = np.mean([r['kl_divergence'] for r in results_per_layer])
     mean_js = np.mean([r['js_divergence'] for r in results_per_layer])
     mean_l2 = np.mean([r['l2_distance'] for r in results_per_layer])
     mean_tv = np.mean([r['total_variation'] for r in results_per_layer])
-    
+
     return {
-        'mean_kl': mean_kl,
-        'mean_js': mean_js,
-        'mean_l2': mean_l2,
-        'mean_tv': mean_tv,
+        'mean_kl': mean_kl, 'mean_js': mean_js,
+        'mean_l2': mean_l2, 'mean_tv': mean_tv,
         'per_layer': results_per_layer,
     }
 
@@ -170,73 +171,33 @@ def compute_attention_divergence(attn_base, attn_prompted, eps=1e-10):
 def run_backbone(backbone_key, task_name, device, num_prompts=5, max_batches=10):
     """Measure attention perturbation for one backbone on one task."""
     bb = BACKBONES[backbone_key]
-    
+
     # Load model
     model = timm.create_model(bb['model'], pretrained=True,
                                img_size=bb['img_size']).to(device)
     model.eval()
-    
+
     # Load data
-    tfm_rgb, tfm_gray = get_transforms(bb['img_size'])
-    use_gray = task_name in ['mnist', 'fashionmnist']
     ds = load_dataset(task_name, bb['img_size'], max_samples=500)
     loader = DataLoader(ds, batch_size=32, shuffle=False, num_workers=0)
-    
-    # === Pass 1: Base model (no prompts) ===
-    extractor_base = AttentionExtractor(model)
-    all_attn_base = [[] for _ in range(len(model.blocks))]
-    
-    with torch.no_grad():
-        for bi, (bx, _) in enumerate(loader):
-            if bi >= max_batches:
-                break
-            extractor_base.clear()
-            model.forward_features(bx.to(device))
-            for l, attn in enumerate(extractor_base.attentions):
-                all_attn_base[l].append(attn.cpu())
-    
-    extractor_base.remove()
-    
-    # Concatenate across batches
-    attn_base = [torch.cat(layer_attns, dim=0) for layer_attns in all_attn_base]
-    
-    # === Pass 2: Model with random VPT prompts ===
-    embed_dim = model.embed_dim
-    num_layers = len(model.blocks)
-    vpt_model = VPTWrapper(model, num_prompts, embed_dim, num_layers).to(device)
-    vpt_model.eval()
-    
-    extractor_vpt = AttentionExtractor(vpt_model.base_model)
-    all_attn_vpt = [[] for _ in range(num_layers)]
-    
-    with torch.no_grad():
-        for bi, (bx, _) in enumerate(loader):
-            if bi >= max_batches:
-                break
-            extractor_vpt.clear()
-            vpt_model.forward_features(bx.to(device))
-            for l, attn in enumerate(extractor_vpt.attentions):
-                all_attn_vpt[l].append(attn.cpu())
-    
-    extractor_vpt.remove()
-    
-    attn_prompted = [torch.cat(layer_attns, dim=0) for layer_attns in all_attn_vpt]
-    
-    # === Compute divergences ===
-    divergences = compute_attention_divergence(attn_base, attn_prompted)
-    
+
+    # Measure perturbation using hook-based approach (works for all models)
+    divergences = measure_perturbation_simple(model, loader, device,
+                                              num_prompts, max_batches)
+
     # Compute σ_P²
     total_norm, cnt = 0.0, 0
+    embed_dim = model.embed_dim
     for name, param in model.named_parameters():
         if any(t in name for t in ['qkv.weight', 'proj.weight']):
             total_norm += param.float().norm().item() ** 2
             cnt += 1
     d_h = embed_dim // model.blocks[0].attn.num_heads
     sigma_sq = total_norm / (cnt * d_h) if cnt > 0 else 1.0
-    
-    del model, vpt_model
+
+    del model
     torch.cuda.empty_cache()
-    
+
     return divergences, sigma_sq
 
 
