@@ -40,6 +40,7 @@ def run_single_scale(base_model, task_name, n_train, bb_key, device, config):
     """Run LoRA and VPT at a single scale."""
     bb = BACKBONES[bb_key]
     num_classes = TASKS[task_name][0]
+    embed_dim = config.embed_dim
 
     ds = load_dataset(task_name, bb['img_size'], max_samples=max(n_train + 200, 6000))
     n_val = min(200, len(ds) // 5)
@@ -56,25 +57,25 @@ def run_single_scale(base_model, task_name, n_train, bb_key, device, config):
 
     # LP
     model_lp = deepcopy(base_model)
-    model_lp = apply_linear_probe(model_lp, num_classes)
-    model_lp = model_lp.to(device)
-    results['LP'] = train_and_evaluate(model_lp, train_loader, val_loader, device, config)
+    model_lp.head = nn.Linear(embed_dim, num_classes).to(device)
+    model_lp = apply_linear_probe(model_lp, config)
+    results['LP'] = train_and_evaluate(model_lp, train_loader, val_loader, config, device)
     del model_lp; torch.cuda.empty_cache()
 
     # LoRA at multiple ranks
     for r in [1, 4, 8, 16]:
         model = deepcopy(base_model)
-        model = apply_lora(model, num_classes, rank=r)
-        model = model.to(device)
-        results[f'LoRA_r{r}'] = train_and_evaluate(model, train_loader, val_loader, device, config)
+        model.head = nn.Linear(embed_dim, num_classes).to(device)
+        model = apply_lora(model, r, config)
+        results[f'LoRA_r{r}'] = train_and_evaluate(model, train_loader, val_loader, config, device)
         del model; torch.cuda.empty_cache()
 
     # VPT at multiple prompt counts
     for p in [1, 5, 10, 20]:
         model = deepcopy(base_model)
-        model = apply_vpt(model, num_classes, num_prompts=p)
-        model = model.to(device)
-        results[f'VPT_p{p}'] = train_and_evaluate(model, train_loader, val_loader, device, config)
+        model.head = nn.Linear(embed_dim, num_classes).to(device)
+        model = apply_vpt(model, p, config)
+        results[f'VPT_p{p}'] = train_and_evaluate(model, train_loader, val_loader, config, device)
         del model; torch.cuda.empty_cache()
 
     return results
@@ -106,6 +107,12 @@ def main():
         print(f"  Loading {bb['name']}...")
         base_model = timm.create_model(bb['model'], pretrained=True,
                                         img_size=bb['img_size']).to(device)
+
+        # Setup config for this backbone
+        config.embed_dim = base_model.embed_dim
+        config.num_layers = len(base_model.blocks)
+        config.num_heads = base_model.blocks[0].attn.num_heads
+        config.head_dim = base_model.embed_dim // base_model.blocks[0].attn.num_heads
 
         # σ_P²
         total_norm, cnt = 0.0, 0

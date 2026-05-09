@@ -79,13 +79,22 @@ def run_single(backbone_key, task_name, device, config):
     base_model = timm.create_model(bb['model'], pretrained=True,
                                     img_size=bb['img_size']).to(device)
 
+    # Setup config for this backbone
+    embed_dim = base_model.embed_dim
+    num_layers = len(base_model.blocks)
+    num_heads = base_model.blocks[0].attn.num_heads
+    d_h = embed_dim // num_heads
+    config.embed_dim = embed_dim
+    config.num_layers = num_layers
+    config.num_heads = num_heads
+    config.head_dim = d_h
+
     # Compute σ_P²
     total_norm, count = 0.0, 0
     for name, param in base_model.named_parameters():
         if any(t in name for t in ['qkv.weight', 'proj.weight']):
             total_norm += param.float().norm().item() ** 2
             count += 1
-    d_h = base_model.embed_dim // base_model.blocks[0].attn.num_heads
     sigma_sq = total_norm / (count * d_h) if count > 0 else 1.0
 
     # Load data
@@ -102,12 +111,13 @@ def run_single(backbone_key, task_name, device, config):
     # --- LoRA at multiple ranks ---
     for r in [1, 4, 8]:
         model = deepcopy(base_model)
+        model.head = nn.Linear(embed_dim, num_classes).to(device)
         # Save state before training
         state_before = {n: p.data.clone() for n, p in model.named_parameters()}
-        model = apply_lora(model, num_classes, rank=r)
+        model = apply_lora(model, r, config)
         model = model.to(device)
 
-        acc = train_and_evaluate(model, train_loader, val_loader, device, config)
+        acc = train_and_evaluate(model, train_loader, val_loader, config, device)
 
         measurements = measure_delta_theta_sq(state_before, model, f'LoRA_r{r}')
         D_eff = 12 * r * d_h  # L * r * d_h
@@ -126,14 +136,15 @@ def run_single(backbone_key, task_name, device, config):
     # --- VPT at multiple prompt counts ---
     for p in [1, 5, 10]:
         model = deepcopy(base_model)
+        model.head = nn.Linear(embed_dim, num_classes).to(device)
         state_before = {n: p_param.data.clone() for n, p_param in model.named_parameters()}
-        model = apply_vpt(model, num_classes, num_prompts=p)
+        model = apply_vpt(model, p, config)
         model = model.to(device)
 
-        acc = train_and_evaluate(model, train_loader, val_loader, device, config)
+        acc = train_and_evaluate(model, train_loader, val_loader, config, device)
 
         measurements = measure_delta_theta_sq(state_before, model, f'VPT_p{p}')
-        d = base_model.embed_dim
+        d = embed_dim
         D_eff = 12 * p * d  # L * p * d
         results[f'VPT_p{p}'] = {
             'accuracy': acc,

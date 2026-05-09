@@ -193,6 +193,13 @@ def main():
     base_model = timm.create_model(bb['model'], pretrained=True,
                                     img_size=bb['img_size']).to(device)
 
+    # Setup config for this backbone
+    embed_dim = base_model.embed_dim
+    config.embed_dim = embed_dim
+    config.num_layers = len(base_model.blocks)
+    config.num_heads = base_model.blocks[0].attn.num_heads
+    config.head_dim = embed_dim // base_model.blocks[0].attn.num_heads
+
     # Compute σ²_P
     total_norm, count = 0.0, 0
     for name, param in base_model.named_parameters():
@@ -233,29 +240,32 @@ def main():
 
         # Train with ATLAS prediction
         model_atlas = deepcopy(base_model)
+        model_atlas.head = nn.Linear(embed_dim, num_classes).to(device)
         if selection['method'] == 'LoRA':
-            model_atlas = apply_lora(model_atlas, num_classes, rank=selection['capacity'])
+            model_atlas = apply_lora(model_atlas, selection['capacity'], config)
         else:
-            model_atlas = apply_vpt(model_atlas, num_classes, num_prompts=selection['capacity'])
+            model_atlas = apply_vpt(model_atlas, selection['capacity'], config)
         model_atlas = model_atlas.to(device)
-        atlas_acc = train_and_evaluate(model_atlas, train_loader, val_loader, device, config)
+        atlas_acc = train_and_evaluate(model_atlas, train_loader, val_loader, config, device)
         del model_atlas; torch.cuda.empty_cache()
 
         # Train with simple rule prediction
         model_sr = deepcopy(base_model)
+        model_sr.head = nn.Linear(embed_dim, num_classes).to(device)
         if sr_method == 'LoRA':
-            model_sr = apply_lora(model_sr, num_classes, rank=sr_cap)
+            model_sr = apply_lora(model_sr, sr_cap, config)
         else:
-            model_sr = apply_vpt(model_sr, num_classes, num_prompts=sr_cap)
+            model_sr = apply_vpt(model_sr, sr_cap, config)
         model_sr = model_sr.to(device)
-        sr_acc = train_and_evaluate(model_sr, train_loader, val_loader, device, config)
+        sr_acc = train_and_evaluate(model_sr, train_loader, val_loader, config, device)
         del model_sr; torch.cuda.empty_cache()
 
         # Train LoRA_r8 baseline
         model_lr8 = deepcopy(base_model)
-        model_lr8 = apply_lora(model_lr8, num_classes, rank=8)
+        model_lr8.head = nn.Linear(embed_dim, num_classes).to(device)
+        model_lr8 = apply_lora(model_lr8, 8, config)
         model_lr8 = model_lr8.to(device)
-        lr8_acc = train_and_evaluate(model_lr8, train_loader, val_loader, device, config)
+        lr8_acc = train_and_evaluate(model_lr8, train_loader, val_loader, config, device)
         del model_lr8; torch.cuda.empty_cache()
 
         # Oracle from existing results (approximate)

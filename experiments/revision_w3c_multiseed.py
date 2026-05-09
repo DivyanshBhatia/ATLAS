@@ -62,14 +62,15 @@ def run_one_seed(base_model, task_name, bb_key, device, config, seed):
     val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=0)
 
     results = {}
+    embed_dim = config.embed_dim
 
     # LoRA at ranks 1, 4, 8
     for r in [1, 4, 8]:
         set_seed(seed)
         model = deepcopy(base_model)
-        model = apply_lora(model, num_classes, rank=r)
-        model = model.to(device)
-        acc = train_and_evaluate(model, train_loader, val_loader, device, config)
+        model.head = nn.Linear(embed_dim, num_classes).to(device)
+        model = apply_lora(model, r, config)
+        acc = train_and_evaluate(model, train_loader, val_loader, config, device)
         results[f'LoRA_r{r}'] = acc
         del model; torch.cuda.empty_cache()
 
@@ -77,9 +78,9 @@ def run_one_seed(base_model, task_name, bb_key, device, config, seed):
     for p in [1, 5, 10]:
         set_seed(seed)
         model = deepcopy(base_model)
-        model = apply_vpt(model, num_classes, num_prompts=p)
-        model = model.to(device)
-        acc = train_and_evaluate(model, train_loader, val_loader, device, config)
+        model.head = nn.Linear(embed_dim, num_classes).to(device)
+        model = apply_vpt(model, p, config)
+        acc = train_and_evaluate(model, train_loader, val_loader, config, device)
         results[f'VPT_p{p}'] = acc
         del model; torch.cuda.empty_cache()
 
@@ -120,6 +121,12 @@ def main():
 
     base_model = timm.create_model(bb['model'], pretrained=True,
                                     img_size=bb['img_size']).to(device)
+
+    # Setup config for this backbone
+    config.embed_dim = base_model.embed_dim
+    config.num_layers = len(base_model.blocks)
+    config.num_heads = base_model.blocks[0].attn.num_heads
+    config.head_dim = base_model.embed_dim // base_model.blocks[0].attn.num_heads
 
     all_results = {}
 
