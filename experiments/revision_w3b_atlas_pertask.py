@@ -89,23 +89,23 @@ def extract_features_and_attention(model, loader, device):
     return features, labels, attention
 
 
-def compute_task_metrics(features, labels, attention):
+def compute_task_metrics(train_features, train_labels, val_features, val_labels, attention):
     """Compute γ (feature gap) and ρ (attention class variance)."""
-    # γ = 1 - LP accuracy (ridge regression)
+    # γ = 1 - LP accuracy on VALIDATION set (not training)
     clf = RidgeClassifier(alpha=1.0)
-    clf.fit(features, labels)
-    lp_acc = clf.score(features, labels)  # Training accuracy as proxy
-    gamma = 1.0 - lp_acc
+    clf.fit(train_features, train_labels)
+    lp_acc = clf.score(val_features, val_labels)  # Validation accuracy
+    gamma = max(0.0, 1.0 - lp_acc)
 
-    # ρ = between-class / within-class attention variance
+    # ρ = between-class / within-class attention variance (on train set)
     rho = 0.0
     if attention is not None:
-        classes = np.unique(labels)
+        classes = np.unique(train_labels)
         if len(classes) > 1:
             class_means = []
             within_var = 0.0
             for c in classes:
-                mask = labels == c
+                mask = train_labels == c
                 if mask.sum() > 1:
                     class_attn = attention[mask]
                     class_means.append(class_attn.mean(0))
@@ -227,10 +227,13 @@ def main():
         train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=0)
 
-        # Extract metrics
-        features, labels, attention = extract_features_and_attention(
+        # Extract metrics from train AND val sets
+        train_features, train_labels, attention = extract_features_and_attention(
             base_model, train_loader, device)
-        gamma, rho, lp_acc = compute_task_metrics(features, labels, attention)
+        val_features, val_labels, _ = extract_features_and_attention(
+            base_model, val_loader, device)
+        gamma, rho, lp_acc = compute_task_metrics(
+            train_features, train_labels, val_features, val_labels, attention)
 
         # ATLAS selection
         selection = atlas_select(gamma, rho, sigma_sq)
@@ -249,17 +252,6 @@ def main():
         atlas_acc = train_and_evaluate(model_atlas, train_loader, val_loader, config, device)
         del model_atlas; torch.cuda.empty_cache()
 
-        # Train with simple rule prediction
-        model_sr = deepcopy(base_model)
-        model_sr.head = nn.Linear(embed_dim, num_classes).to(device)
-        if sr_method == 'LoRA':
-            model_sr = apply_lora(model_sr, sr_cap, config)
-        else:
-            model_sr = apply_vpt(model_sr, sr_cap, config)
-        model_sr = model_sr.to(device)
-        sr_acc = train_and_evaluate(model_sr, train_loader, val_loader, config, device)
-        del model_sr; torch.cuda.empty_cache()
-
         # Train LoRA_r8 baseline
         model_lr8 = deepcopy(base_model)
         model_lr8.head = nn.Linear(embed_dim, num_classes).to(device)
@@ -268,18 +260,41 @@ def main():
         lr8_acc = train_and_evaluate(model_lr8, train_loader, val_loader, config, device)
         del model_lr8; torch.cuda.empty_cache()
 
-        # Oracle from existing results (approximate)
-        oracle_acc = max(atlas_acc, sr_acc, lr8_acc, lp_acc)
+        # Train with simple rule — skip if identical to LoRA_r8
+        if sr_method == 'LoRA' and sr_cap == 8:
+            sr_acc = lr8_acc  # Reuse, don't train twice
+        else:
+            model_sr = deepcopy(base_model)
+            model_sr.head = nn.Linear(embed_dim, num_classes).to(device)
+            if sr_method == 'LoRA':
+                model_sr = apply_lora(model_sr, sr_cap, config)
+            else:
+                model_sr = apply_vpt(model_sr, sr_cap, config)
+            model_sr = model_sr.to(device)
+            sr_acc = train_and_evaluate(model_sr, train_loader, val_loader, config, device)
+            del model_sr; torch.cuda.empty_cache()
+
+        # Train actual LP for oracle comparison
+        model_lp = deepcopy(base_model)
+        model_lp.head = nn.Linear(embed_dim, num_classes).to(device)
+        model_lp = apply_linear_probe(model_lp, config)
+        model_lp = model_lp.to(device)
+        real_lp_acc = train_and_evaluate(model_lp, train_loader, val_loader, config, device)
+        del model_lp; torch.cuda.empty_cache()
+
+        # Oracle = best of all methods actually tested
+        oracle_acc = max(atlas_acc, sr_acc, lr8_acc, real_lp_acc)
 
         atlas_str = f"{selection['method']}_{'r' if selection['method']=='LoRA' else 'p'}{selection['capacity']}"
         sr_str = f"{sr_method}_{'r' if sr_method=='LoRA' else 'p'}{sr_cap}"
 
         print(f"  {task:<14s} {gamma:>5.2f} {rho:>6.3f} {atlas_str:>12s} "
               f"{atlas_acc:>10.3f} {oracle_acc:>10.3f} {lr8_acc:>7.3f} "
-              f"{sr_str:>12s} {sr_acc:>8.3f}")
+              f"{sr_str:>12s} {sr_acc:>8.3f}  LP={real_lp_acc:.3f}")
 
         all_results[task] = {
             'gamma': gamma, 'rho': rho, 'lp_acc': lp_acc,
+            'real_lp_acc': real_lp_acc,
             'atlas_selection': selection,
             'atlas_acc': atlas_acc,
             'lr8_acc': lr8_acc,
