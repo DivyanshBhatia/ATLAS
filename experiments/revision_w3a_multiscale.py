@@ -41,16 +41,14 @@ def run_single_scale(base_model, task_name, n_train, bb_key, device, config):
     bb = BACKBONES[bb_key]
     num_classes = TASKS[task_name][0]
 
-    tfm = get_transforms(bb['img_size'])
-    if task_name in ['mnist', 'fashionmnist', 'emnist_letters']:
-        tfm = transforms.Compose([
-            transforms.Resize((bb['img_size'], bb['img_size'])),
-            transforms.Grayscale(3),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-
-    train_ds, val_ds = load_dataset(task_name, tfm, n_train=n_train, n_val=200)
+    ds = load_dataset(task_name, bb['img_size'], max_samples=max(n_train + 200, 6000))
+    n_val = min(200, len(ds) // 5)
+    actual_train = min(n_train, len(ds) - n_val)
+    train_ds, val_ds = torch.utils.data.random_split(
+        ds, [len(ds) - n_val, n_val], generator=torch.Generator().manual_seed(42))
+    if actual_train < len(train_ds):
+        indices = torch.randperm(len(train_ds))[:actual_train].tolist()
+        train_ds = Subset(train_ds, indices)
     train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=0)
 

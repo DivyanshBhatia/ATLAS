@@ -177,17 +177,10 @@ def run_backbone(backbone_key, task_name, device, num_prompts=5, max_batches=10)
     model.eval()
     
     # Load data
-    tfm = get_transforms(bb['img_size'])
-    if task_name in ['mnist', 'fashionmnist']:
-        tfm = transforms.Compose([
-            transforms.Resize((bb['img_size'], bb['img_size'])),
-            transforms.Grayscale(3),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-    
-    train_ds, _ = load_dataset(task_name, tfm, n_train=500, n_val=100)
-    loader = DataLoader(train_ds, batch_size=32, shuffle=False, num_workers=0)
+    tfm_rgb, tfm_gray = get_transforms(bb['img_size'])
+    use_gray = task_name in ['mnist', 'fashionmnist']
+    ds = load_dataset(task_name, bb['img_size'], max_samples=500)
+    loader = DataLoader(ds, batch_size=32, shuffle=False, num_workers=0)
     
     # === Pass 1: Base model (no prompts) ===
     extractor_base = AttentionExtractor(model)

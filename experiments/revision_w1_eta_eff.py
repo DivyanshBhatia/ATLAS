@@ -89,16 +89,11 @@ def run_single(backbone_key, task_name, device, config):
     sigma_sq = total_norm / (count * d_h) if count > 0 else 1.0
 
     # Load data
-    tfm = get_transforms(bb['img_size'])
-    if task_name in ['mnist', 'fashionmnist', 'emnist_letters']:
-        tfm = transforms.Compose([
-            transforms.Resize((bb['img_size'], bb['img_size'])),
-            transforms.Grayscale(3),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-
-    train_ds, val_ds = load_dataset(task_name, tfm, n_train=800, n_val=200)
+    ds = load_dataset(task_name, bb['img_size'], max_samples=1000)
+    n_val = min(200, len(ds) // 5)
+    n_train = len(ds) - n_val
+    train_ds, val_ds = torch.utils.data.random_split(
+        ds, [n_train, n_val], generator=torch.Generator().manual_seed(42))
     train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=0)
 

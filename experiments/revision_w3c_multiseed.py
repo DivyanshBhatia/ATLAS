@@ -54,16 +54,10 @@ def run_one_seed(base_model, task_name, bb_key, device, config, seed):
     bb = BACKBONES[bb_key]
     num_classes = TASKS[task_name][0]
 
-    tfm = get_transforms(bb['img_size'])
-    if task_name in ['mnist', 'fashionmnist', 'emnist_letters']:
-        tfm = transforms.Compose([
-            transforms.Resize((bb['img_size'], bb['img_size'])),
-            transforms.Grayscale(3),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-
-    train_ds, val_ds = load_dataset(task_name, tfm, n_train=800, n_val=200)
+    ds = load_dataset(task_name, bb['img_size'], max_samples=1000)
+    n_val = min(200, len(ds) // 5)
+    train_ds, val_ds = torch.utils.data.random_split(
+        ds, [len(ds) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
     train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=0)
 
