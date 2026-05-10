@@ -126,7 +126,7 @@ def atlas_select(gamma, rho, sigma_sq, n=800, L=12, d=768, d_h=64):
 
     # Gap-scaled capacity
     r_task = max(1, min(32, int(r_star * gamma / 0.2)))
-    p_task = max(1, min(50, int(np.ceil(p_star * gamma / 0.1))))
+    p_task = max(1, min(p_star, int(np.ceil(p_star * gamma / 0.2))))  # Cap at p*, not 50
 
     # VPT score
     eps = 0.01
