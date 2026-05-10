@@ -110,9 +110,9 @@ def apply_vpt_generic(model, num_prompts):
         param.requires_grad_(False)
 
     embed_dim = model.embed_dim
-    new_blocks = nn.ModuleList()
-    for block in model.blocks:
-        new_blocks.append(VPTLayer(block, num_prompts, embed_dim))
+    new_blocks = nn.Sequential()
+    for i, block in enumerate(model.blocks):
+        new_blocks.add_module(str(i), VPTLayer(block, num_prompts, embed_dim))
     model.blocks = new_blocks
 
     for name, param in model.named_parameters():
