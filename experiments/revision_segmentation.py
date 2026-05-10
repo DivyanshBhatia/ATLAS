@@ -316,7 +316,7 @@ def main():
 
     # Compute σ²_P for reference
     from config import compute_sigma_p_sq
-    sigma_p = compute_sigma_p_sq(base_model.backbone)
+    sigma_p = compute_sigma_p_sq(base_model.backbone.state_dict(), config)
     r_star = int(2 * args.n_train * sigma_p / (config.num_layers * config.head_dim))
     p_star = int(4 * args.n_train * sigma_p / (config.num_layers * config.embed_dim))
     print(f"\n  σ²_P = {sigma_p:.2f}, r* = {r_star}, p* = {p_star}")
