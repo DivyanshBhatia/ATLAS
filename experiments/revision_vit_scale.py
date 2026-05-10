@@ -39,16 +39,16 @@ VIT_SCALES = {
         'ratio': 384 // 128,  # = 3
     },
     'base': {
-        'model': 'vit_base_patch16_224.augreg_in1k',
+        'model': 'deit3_base_patch16_224.fb_in1k',
         'img_size': 224,
-        'name': 'ViT-B/16 (d=768)',
+        'name': 'DeiT-III-B/16 (d=768)',
         'd': 768, 'd_h': 64, 'heads': 12, 'layers': 12,
         'ratio': 768 // 128,  # = 6
     },
     'large': {
-        'model': 'vit_large_patch16_224.augreg_in1k',
+        'model': 'deit3_large_patch16_224.fb_in1k',
         'img_size': 224,
-        'name': 'ViT-L/16 (d=1024)',
+        'name': 'DeiT-III-L/16 (d=1024)',
         'd': 1024, 'd_h': 64, 'heads': 16, 'layers': 24,
         'ratio': 1024 // 128,  # = 8
     },
@@ -164,8 +164,10 @@ def run_scale(scale_key, tasks, device, n_train=800):
         train_ds, val_ds = torch.utils.data.random_split(
             ds, [len(ds) - n_val, n_val],
             generator=torch.Generator().manual_seed(42))
-        train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=0)
+        # Adaptive batch size for memory
+        batch_size = 16 if scale['d'] >= 1024 else 64
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
         task_results = {}
 
