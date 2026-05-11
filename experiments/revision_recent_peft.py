@@ -87,7 +87,7 @@ class DoRALayer(nn.Module):
         return combined
 
 
-def apply_dora(model, rank, config):
+def apply_dora(model, rank):
     """Apply DoRA to all attention layers."""
     for param in model.parameters():
         param.requires_grad_(False)
