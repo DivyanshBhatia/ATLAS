@@ -27,11 +27,13 @@ def analyze_per_layer_variance(model_name, img_size):
     layer_details = []
     
     for i, block in enumerate(model.blocks):
-        # Collect norms from all attention weight matrices
+        # Collect norms from EXACTLY the same weights as compute_sigma_p_sq
         norms = {}
         for name, param in block.attn.named_parameters():
-            if 'weight' in name:
-                norms[name] = param.float().norm().item() ** 2
+            if 'qkv' in name and 'weight' in name:
+                norms['qkv.weight'] = param.float().norm().item() ** 2
+            elif 'proj' in name and 'weight' in name:
+                norms['proj.weight'] = param.float().norm().item() ** 2
         
         # σ²_l = average squared norm / d_h  
         total_norm = sum(norms.values())
