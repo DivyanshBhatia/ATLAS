@@ -95,7 +95,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--backbone', type=str, default='dinov2')
     parser.add_argument('--tasks', nargs='+', default=['cifar100', 'svhn', 'eurosat'])
+    parser.add_argument('--n', nargs='+', type=int, default=[800, 2000, 5000, 10000],
+                        help='Training set sizes to test')
     args = parser.parse_args()
+    
+    n_values = args.n
     
     device = setup_device()
     config = ExperimentConfig()
@@ -106,7 +110,7 @@ def main():
     
     print("=" * 70)
     print(f"Larger-n Validation: {bb['name']}")
-    print(f"n values: {N_VALUES}")
+    print(f"n values: {n_values}")
     print("=" * 70)
     
     base_model = timm.create_model(bb['model'], pretrained=True,
@@ -129,7 +133,7 @@ def main():
         
         task_results = {}
         
-        for n in N_VALUES:
+        for n in n_values:
             print(f"\n  n = {n}:")
             results = run_at_n(base_model, task, n, bb_key, device, config)
             if results:
