@@ -79,30 +79,24 @@ def main():
         print(f"    LoRA_r8 (lr=1e-3): {lora_acc:.3f}")
         del model; torch.cuda.empty_cache()
 
-        # VPT sweep
+        # VPT sweep across LRs only
         case_results = {'LoRA_r8': lora_acc}
         best_vpt = 0
 
         for lr in LRS:
-            for wd in WDS:
-                model = deepcopy(base_model)
-                model.head = nn.Linear(config.embed_dim, num_classes).to(device)
-                model = apply_vpt(model, 5, config)
-                model = model.to(device)
+            model = deepcopy(base_model)
+            model.head = nn.Linear(config.embed_dim, num_classes).to(device)
+            model = apply_vpt(model, 5, config)
+            model = model.to(device)
 
-                config.lr = lr
-                # Use custom optimizer with this WD
-                optimizer = torch.optim.AdamW(
-                    [p for p in model.parameters() if p.requires_grad],
-                    lr=lr, weight_decay=wd)
+            config.lr = lr
+            acc = train_and_evaluate(model, train_loader, val_loader, config, device)
+            tag = f"VPT_p5_lr{lr}"
+            case_results[tag] = acc
+            best_vpt = max(best_vpt, acc)
+            print(f"    {tag}: {acc:.3f}")
 
-                acc = train_and_evaluate(model, train_loader, val_loader, config, device)
-                tag = f"VPT_p5_lr{lr}_wd{wd}"
-                case_results[tag] = acc
-                best_vpt = max(best_vpt, acc)
-                print(f"    {tag}: {acc:.3f}")
-
-                del model; torch.cuda.empty_cache()
+            del model; torch.cuda.empty_cache()
 
         case_results['best_vpt'] = best_vpt
         all_results[key] = case_results
