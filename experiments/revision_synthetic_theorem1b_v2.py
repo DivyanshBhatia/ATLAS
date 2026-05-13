@@ -224,7 +224,7 @@ def apply_vpt_minimal(model, num_prompts):
 
 
 def extract_feature_pairs(backbone_name, img_size, n_pairs=500, seed=42):
-    """Extract pairs of patch embedding vectors from real images."""
+    """Extract pairs of MAXIMALLY DISTINCT patch embedding vectors."""
     model = timm.create_model(backbone_name, pretrained=True, img_size=img_size)
     model.eval()
     
@@ -237,42 +237,41 @@ def extract_feature_pairs(backbone_name, img_size, n_pairs=500, seed=42):
     ds = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
     loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=0)
     
-    all_embeddings = []
+    # Collect patch embeddings grouped by image class
+    class_embeddings = {i: [] for i in range(10)}
     with torch.no_grad():
-        for imgs, _ in loader:
-            # Get patch embeddings (before transformer blocks)
+        for imgs, labels in loader:
             x = model.patch_embed(imgs)  # (B, N, d)
-            all_embeddings.append(x)
-            if len(all_embeddings) * 64 >= 2 * n_pairs + 100:
+            # Take center patch (most informative)
+            center = x.shape[1] // 2
+            center_patches = x[:, center, :]  # (B, d)
+            for i in range(len(labels)):
+                class_embeddings[labels[i].item()].append(center_patches[i])
+            if all(len(v) >= n_pairs // 5 for v in class_embeddings.values()):
                 break
     
-    all_embeddings = torch.cat(all_embeddings, dim=0)  # (total_imgs, N, d)
+    for k in class_embeddings:
+        class_embeddings[k] = torch.stack(class_embeddings[k])
     
-    # For each pair: pick two different patches from different images
+    # Create pairs from DIFFERENT classes for maximum feature distinction
     rng = np.random.RandomState(seed)
     pairs = []
-    indices = rng.permutation(len(all_embeddings))
     
-    for i in range(n_pairs):
-        img_a_idx = indices[2*i]
-        img_b_idx = indices[2*i + 1]
-        
-        # Take patch 0 from image A and patch 1 from image B
-        # (ensures a ≠ b since they come from different images)
-        patch_a = rng.randint(0, all_embeddings.shape[1])
-        patch_b = rng.randint(0, all_embeddings.shape[1])
-        
-        a = all_embeddings[img_a_idx, patch_a].clone()
-        b = all_embeddings[img_b_idx, patch_b].clone()
-        
-        # Ensure they're different enough
-        if (a - b).norm() > 0.1:
-            pairs.append((a, b))
+    for _ in range(n_pairs):
+        c1, c2 = rng.choice(10, size=2, replace=False)
+        idx1 = rng.randint(0, len(class_embeddings[c1]))
+        idx2 = rng.randint(0, len(class_embeddings[c2]))
+        a = class_embeddings[c1][idx1].clone()
+        b = class_embeddings[c2][idx2].clone()
+        pairs.append((a, b))
     
     del model
     torch.cuda.empty_cache()
     
-    print(f"  Extracted {len(pairs)} feature pairs (d={all_embeddings.shape[2]})")
+    # Report feature distances
+    dists = [torch.norm(a - b).item() for a, b in pairs]
+    print(f"  Extracted {len(pairs)} feature pairs (d={pairs[0][0].shape[0]})")
+    print(f"  Feature distances: mean={np.mean(dists):.2f}, min={np.min(dists):.2f}, max={np.max(dists):.2f}")
     return pairs
 
 
@@ -334,12 +333,12 @@ def main():
     print(f"Task: [CLS, a+pos1, b+pos2] vs [CLS, b+pos1, a+pos2]")
     print("=" * 70)
     
-    # Extract feature pairs from real images
-    print("\n  Extracting feature pairs...")
-    pairs = extract_feature_pairs(backbone_name, img_size, n_pairs=500, seed=42)
+    # Extract feature pairs from real images — use DISTINCT classes
+    print("\n  Extracting feature pairs (from distinct CIFAR classes)...")
+    pairs = extract_feature_pairs(backbone_name, img_size, n_pairs=2000, seed=42)
     
-    train_pairs = pairs[:400]
-    val_pairs = pairs[400:]
+    train_pairs = pairs[:1500]
+    val_pairs = pairs[1500:]
     
     train_ds = TokenSwapDataset(train_pairs, seed=42)
     val_ds = TokenSwapDataset(val_pairs, seed=123)
@@ -360,9 +359,11 @@ def main():
         ('LoRA_WV_r8',       lambda m: apply_lora_wv_only(m, 8),  1e-3),
         ('LoRA_all_r4',      lambda m: apply_lora_all(m, 4),      1e-3),
         ('LoRA_all_r8',      lambda m: apply_lora_all(m, 8),      1e-3),
-        ('VPT_p1',           lambda m: apply_vpt_minimal(m, 1),   1e-2),
-        ('VPT_p5',           lambda m: apply_vpt_minimal(m, 5),   1e-2),
-        ('VPT_p10',          lambda m: apply_vpt_minimal(m, 10),  1e-2),
+        ('VPT_p5_lr1e-2',    lambda m: apply_vpt_minimal(m, 5),   1e-2),
+        ('VPT_p5_lr1e-3',    lambda m: apply_vpt_minimal(m, 5),   1e-3),
+        ('VPT_p10_lr1e-2',   lambda m: apply_vpt_minimal(m, 10),  1e-2),
+        ('VPT_p10_lr1e-3',   lambda m: apply_vpt_minimal(m, 10),  1e-3),
+        ('VPT_p20',          lambda m: apply_vpt_minimal(m, 20),  1e-2),
     ]
     
     for name, apply_fn, lr in methods:
@@ -377,7 +378,7 @@ def main():
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"    Trainable: {trainable:,}")
         
-        acc = train_and_eval(model, train_loader, val_loader, device, epochs=100, lr=lr)
+        acc = train_and_eval(model, train_loader, val_loader, device, epochs=200, lr=lr)
         results[name] = acc
         
         marker = ""
