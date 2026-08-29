@@ -47,7 +47,7 @@ BACKBONES = {
     'CLIP':       ('vit_base_patch16_clip_224.openai', 224),
     'Supervised':  ('vit_base_patch16_224.augreg_in1k', 224),
     'DeiT-III':   ('deit3_base_patch16_224.fb_in1k', 224),
-    'MAE':        ('vit_base_patch16_mae', 224),
+    'MAE':        ('vit_base_patch16_224.mae', 224),
 }
 
 
