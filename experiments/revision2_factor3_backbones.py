@@ -10,12 +10,18 @@ Tests whether Factor 3 (DINO exceptionalism) is:
 - General to self-supervised models (all SSL fail)
 - DINO-architecture-specific (only DINOv2 fails)
 
+IMPORTANT: Before running, verify model names with:
+  python -c "import timm; print(timm.list_models('*mae*', pretrained=True))"
+  python -c "import timm; print(timm.list_models('*beit*', pretrained=True))"
+
 Usage:
     python revision2_factor3_backbones.py
+    python revision2_factor3_backbones.py --backbones DINOv2 MAE DeiT-III
 """
 import sys
 sys.path.insert(0, '.')
 
+import argparse
 import torch
 import torch.nn as nn
 import timm
@@ -27,34 +33,94 @@ from copy import deepcopy
 from config import ExperimentConfig, setup_device
 from exp2_comparison import apply_lora, apply_vpt, train_and_evaluate
 from run_all_backbones import TASKS, load_dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
-# Self-supervised backbones beyond DINO
-SSL_BACKBONES = {
-    # DINO family (expected to resist VPT)
-    'DINOv2': ('vit_base_patch14_dinov2.lvd142m', 518),
-    # Non-DINO self-supervised (the test cases)
-    'MAE': ('vit_base_patch16_mae', 224),
-    'BEiTv2': ('beitv2_base_patch16_224.in1k_ft_in22k', 224),
-    # Supervised controls
-    'DeiT-III': ('deit3_base_patch16_224.fb_in1k', 224),
-    'Supervised': ('vit_base_patch16_224.augreg_in1k', 224),
-}
 
-# Try to add iBOT if available
-try:
-    _ = timm.create_model('vit_base_patch16_224.ibot_in1k', pretrained=False)
-    SSL_BACKBONES['iBOT'] = ('vit_base_patch16_224.ibot_in1k', 224)
-except:
-    pass
+def discover_backbones():
+    """Discover available backbone models in timm."""
+    candidates = {
+        # DINO family (expected to resist VPT)
+        'DINOv2': [
+            'vit_base_patch14_dinov2.lvd142m',
+        ],
+        # Non-DINO self-supervised
+        'MAE': [
+            'vit_base_patch16_224.mae',
+            'vit_base_patch16_mae',
+        ],
+        'BEiTv2': [
+            'beitv2_base_patch16_224.in1k_ft_in22k',
+            'beitv2_base_patch16_224',
+            'beitv2_base_patch16_224.in1k_ft_in22k_in1k',
+        ],
+        'BEiT': [
+            'beit_base_patch16_224.in22k_ft_in22k_in1k',
+            'beit_base_patch16_224.in22k_ft_in22k',
+            'beit_base_patch16_224',
+        ],
+        # Supervised controls
+        'DeiT-III': [
+            'deit3_base_patch16_224.fb_in1k',
+            'deit3_base_patch16_224',
+        ],
+        'Supervised': [
+            'vit_base_patch16_224.augreg_in1k',
+            'vit_base_patch16_224.augreg2_in21k_ft_in1k',
+        ],
+    }
+    
+    # Try to find iBOT and DINOv1
+    for name_pattern in ['*ibot*', '*dino*']:
+        try:
+            models = timm.list_models(name_pattern, pretrained=True)
+            if 'ibot' in name_pattern:
+                base_models = [m for m in models if 'base' in m]
+                if base_models:
+                    candidates['iBOT'] = base_models[:3]
+            elif 'dino' in name_pattern:
+                # DINOv1 only (exclude v2)
+                v1_models = [m for m in models if 'base' in m and 'v2' not in m and 'dinov2' not in m]
+                if v1_models:
+                    candidates['DINOv1'] = v1_models[:3]
+        except:
+            pass
+    
+    # Try MoCo
+    try:
+        moco_models = timm.list_models('*moco*', pretrained=True)
+        base_moco = [m for m in moco_models if 'base' in m]
+        if base_moco:
+            candidates['MoCo-v3'] = base_moco[:3]
+    except:
+        pass
+    
+    # Resolve: try each candidate, keep first that works
+    available = {}
+    for bb_name, model_list in candidates.items():
+        for model_name in model_list:
+            try:
+                # Quick check — don't download, just verify it exists
+                timm.create_model(model_name, pretrained=False)
+                available[bb_name] = model_name
+                break
+            except:
+                continue
+    
+    return available
+
 
 TEST_TASKS = ['cifar100', 'svhn', 'gtsrb', 'eurosat', 'dtd']
+
+# Use best LRs from fair comparison experiment
+BEST_LRS = {
+    'lora': 1e-3,      # default, works well across backbones
+    'vpt_default': 1e-2,
+    'vpt_dinov2': 1e-3,  # DINOv2 needs lower VPT LR
+}
 
 
 def compute_gradient_metric(model, data_loader, device, num_prompts=5, config=None):
     """Compute linearized VPT gradient magnitude."""
-    from copy import deepcopy
-
     model_vpt = deepcopy(model).to(device)
     model_vpt = apply_vpt(model_vpt, num_prompts, config)
     model_vpt = model_vpt.to(device)
@@ -69,6 +135,7 @@ def compute_gradient_metric(model, data_loader, device, num_prompts=5, config=No
             param.requires_grad_(False)
 
     if not prompt_params:
+        del model_vpt; torch.cuda.empty_cache()
         return 0.0
 
     total_grad_norm = 0.0
@@ -81,7 +148,8 @@ def compute_gradient_metric(model, data_loader, device, num_prompts=5, config=No
         model_vpt.zero_grad()
         loss.backward()
 
-        batch_grad = sum(p.grad.float().norm().item()**2 for p in prompt_params if p.grad is not None)
+        batch_grad = sum(p.grad.float().norm().item()**2 
+                        for p in prompt_params if p.grad is not None)
         total_grad_norm += batch_grad
         n_batches += 1
         if n_batches >= 5:
@@ -92,7 +160,31 @@ def compute_gradient_metric(model, data_loader, device, num_prompts=5, config=No
     return total_grad_norm / max(n_batches, 1)
 
 
+def compute_sigma_invariant(model):
+    """Compute reparameterization-invariant σ²_P (geometric mean)."""
+    d = model.embed_dim
+    per_layer = []
+    for block in model.blocks:
+        W_qkv = block.attn.qkv.weight.float()
+        W_q = W_qkv[:d]
+        W_k = W_qkv[d:2*d]
+        W_v = W_qkv[2*d:]
+        W_o = block.attn.proj.weight.float()
+        
+        geom_attn = W_q.norm().item() * W_k.norm().item()
+        geom_val = W_v.norm().item() * W_o.norm().item()
+        per_layer.append((geom_attn + geom_val) / (2 * d))
+    
+    return np.mean(per_layer)
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--backbones', nargs='+', default=None,
+                        help='Subset of backbones to test')
+    parser.add_argument('--tasks', nargs='+', default=TEST_TASKS)
+    args = parser.parse_args()
+
     device = setup_device()
     config = ExperimentConfig()
     config.epochs = 100
@@ -101,9 +193,24 @@ def main():
     print("Factor 3 Generalization: Self-Supervised Backbone Test")
     print("=" * 70)
 
-    all_results = {}
+    # Discover available backbones
+    print("\n  Discovering available backbones...")
+    available = discover_backbones()
+    for bb, model in available.items():
+        print(f"    {bb:<15s}: {model}")
+    
+    if not available:
+        print("  ERROR: No backbones found! Check timm installation.")
+        return
 
-    for bb_name, (model_name, img_size) in SSL_BACKBONES.items():
+    # Filter if user specified
+    if args.backbones:
+        available = {k: v for k, v in available.items() if k in args.backbones}
+
+    all_results = {}
+    img_size = 224  # consistent across all backbones
+
+    for bb_name, model_name in available.items():
         print(f"\n{'='*55}")
         print(f"  Backbone: {bb_name} ({model_name})")
         print(f"{'='*55}")
@@ -115,55 +222,56 @@ def main():
             print(f"  SKIP: {e}")
             continue
 
+        # Check model has expected structure
+        if not hasattr(base_model, 'blocks') or not hasattr(base_model, 'embed_dim'):
+            print(f"  SKIP: model doesn't have expected ViT structure")
+            del base_model; torch.cuda.empty_cache()
+            continue
+
         config.embed_dim = base_model.embed_dim
         config.num_layers = len(base_model.blocks)
         config.num_heads = base_model.blocks[0].attn.num_heads
         config.head_dim = base_model.embed_dim // base_model.blocks[0].attn.num_heads
 
-        # Compute σ²_P
-        sigma_p = 0
-        count = 0
-        for block in base_model.blocks:
-            W = block.attn.qkv.weight.float()
-            d = base_model.embed_dim
-            for i in range(3):
-                sigma_p += W[i*d:(i+1)*d].norm()**2
-                count += 1
-            sigma_p += block.attn.proj.weight.float().norm()**2
-            count += 1
-        sigma_p = (sigma_p / (count * config.head_dim)).item()
+        # Compute invariant σ²_P
+        sigma_p = compute_sigma_invariant(base_model)
+        
+        # Determine VPT LR based on backbone type
+        is_dino = 'dino' in bb_name.lower() or 'dino' in model_name.lower()
+        vpt_lr = BEST_LRS['vpt_dinov2'] if is_dino else BEST_LRS['vpt_default']
 
-        bb_results = {'sigma_p': sigma_p, 'tasks': {}}
-        print(f"  σ²_P = {sigma_p:.2f}")
+        bb_results = {'sigma_p': sigma_p, 'model': model_name, 
+                      'vpt_lr': vpt_lr, 'is_dino': is_dino, 'tasks': {}}
+        print(f"  σ²_P (invariant) = {sigma_p:.4f}, VPT LR = {vpt_lr:.0e}")
 
-        for task in TEST_TASKS:
+        for task in args.tasks:
             if task not in TASKS:
                 continue
             num_classes = TASKS[task][0]
 
             ds = load_dataset(task, img_size, max_samples=1000)
             n_val = min(200, len(ds) // 5)
-            train_ds, val_ds = torch.utils.data.random_split(
+            train_ds, val_ds = random_split(
                 ds, [len(ds) - n_val, n_val],
                 generator=torch.Generator().manual_seed(42))
-            train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=0)
-            val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=0)
+            train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=2)
+            val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=2)
 
             # LoRA_r8
             model = deepcopy(base_model)
             model.head = nn.Linear(config.embed_dim, num_classes).to(device)
             model = apply_lora(model, 8, config)
             model = model.to(device)
-            config.lr = 1e-3
+            config.lr = BEST_LRS['lora']
             lora_acc = train_and_evaluate(model, train_loader, val_loader, config, device)
             del model; torch.cuda.empty_cache()
 
-            # VPT_p5
+            # VPT_p5 at backbone-appropriate LR
             model = deepcopy(base_model)
             model.head = nn.Linear(config.embed_dim, num_classes).to(device)
             model = apply_vpt(model, 5, config)
             model = model.to(device)
-            config.lr = 1e-2
+            config.lr = vpt_lr
             vpt_acc = train_and_evaluate(model, train_loader, val_loader, config, device)
             del model; torch.cuda.empty_cache()
 
@@ -174,14 +282,15 @@ def main():
                                                 config=config)
             del model_tmp; torch.cuda.empty_cache()
 
-            winner = 'L' if lora_acc > vpt_acc + 0.02 else 'V' if vpt_acc > lora_acc + 0.02 else 'T'
+            winner = 'L' if lora_acc > vpt_acc + 0.02 else \
+                     'V' if vpt_acc > lora_acc + 0.02 else 'T'
 
             bb_results['tasks'][task] = {
-                'lora': lora_acc, 'vpt': vpt_acc,
-                'winner': winner, 'grad_mag': grad_mag
+                'lora': float(lora_acc), 'vpt': float(vpt_acc),
+                'winner': winner, 'grad_mag': float(grad_mag)
             }
 
-            print(f"  {task:<12s}: LoRA={lora_acc:.3f} VPT={vpt_acc:.3f} "
+            print(f"    {task:<12s}: LoRA={lora_acc:.3f} VPT={vpt_acc:.3f} "
                   f"→ {winner}  grad={grad_mag:.2f}")
 
         # Summary for this backbone
@@ -189,11 +298,12 @@ def main():
         for t, r in bb_results['tasks'].items():
             wins[r['winner']] += 1
         bb_results['wins'] = wins
-        mean_grad = np.mean([r['grad_mag'] for r in bb_results['tasks'].values()])
-        bb_results['mean_grad'] = mean_grad
+        
+        grad_values = [r['grad_mag'] for r in bb_results['tasks'].values()]
+        bb_results['mean_grad'] = float(np.mean(grad_values)) if grad_values else 0
 
         print(f"\n  L/T/V = {wins['L']}/{wins['T']}/{wins['V']}, "
-              f"mean grad = {mean_grad:.2f}")
+              f"mean grad = {bb_results['mean_grad']:.2f}")
 
         all_results[bb_name] = bb_results
         del base_model; torch.cuda.empty_cache()
@@ -202,12 +312,32 @@ def main():
     print(f"\n{'='*70}")
     print("CROSS-BACKBONE FACTOR 3 ANALYSIS")
     print(f"{'='*70}")
-    print(f"  {'Backbone':<15s} {'σ²_P':>8s} {'Grad':>8s} {'L/T/V':>8s} {'VPT viable?'}")
-    for bb, r in sorted(all_results.items(), key=lambda x: x[1].get('mean_grad', 0), reverse=True):
+    print(f"  {'Backbone':<15s} {'σ²_P':>8s} {'Grad':>8s} {'L/T/V':>10s} {'DINO?':>6s} {'VPT viable?'}")
+    for bb, r in sorted(all_results.items(), 
+                         key=lambda x: x[1].get('mean_grad', 0), reverse=True):
         w = r.get('wins', {})
         viable = "Yes" if w.get('V', 0) > 0 else "No"
-        print(f"  {bb:<15s} {r['sigma_p']:>8.2f} {r.get('mean_grad', 0):>8.2f} "
-              f"{w.get('L',0)}/{w.get('T',0)}/{w.get('V',0):>8s} {viable}")
+        dino = "Yes" if r.get('is_dino', False) else "No"
+        ltv = f"{w.get('L',0)}/{w.get('T',0)}/{w.get('V',0)}"
+        print(f"  {bb:<15s} {r['sigma_p']:>8.4f} {r.get('mean_grad', 0):>8.2f} "
+              f"{ltv:>10s} {dino:>6s} {viable}")
+
+    # Key question
+    print(f"\n  KEY QUESTION: Is VPT resistance specific to DINO self-distillation?")
+    dino_bbs = [bb for bb, r in all_results.items() if r.get('is_dino', False)]
+    ssl_non_dino = [bb for bb, r in all_results.items() 
+                    if not r.get('is_dino', False) and bb in ['MAE', 'BEiTv2', 'BEiT', 'iBOT', 'MoCo-v3', 'DINOv1']]
+    sup_bbs = [bb for bb, r in all_results.items()
+               if bb in ['DeiT-III', 'Supervised']]
+    
+    for group_name, group in [('DINO family', dino_bbs), 
+                               ('SSL non-DINO', ssl_non_dino),
+                               ('Supervised', sup_bbs)]:
+        if not group:
+            continue
+        vpt_wins = sum(all_results[bb]['wins'].get('V', 0) for bb in group)
+        total = sum(sum(all_results[bb]['wins'].values()) for bb in group)
+        print(f"    {group_name:<20s}: {vpt_wins}/{total} VPT wins")
 
     os.makedirs('results', exist_ok=True)
     with open('results/revision2_factor3.json', 'w') as f:

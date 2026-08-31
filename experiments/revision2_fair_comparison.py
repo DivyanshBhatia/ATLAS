@@ -6,7 +6,7 @@ but with the best LRs discovered from the sweep.
 
 From the sweep results:
   - VPT_p5 best LR: 1e-3
-  - VPT_p1 best LR: 5e-3
+  - VPT_p1 best LR: 5e-3  
   - LoRA_r8 best LR: 2e-3
   - Default: VPT LR=1e-2, LoRA LR=1e-3
 
@@ -43,9 +43,9 @@ BEST_LRS = {
         'lora_r8': 2e-3,
     },
     'dinov2reg': {
-        'vpt_p5': 1e-3,   # same as DINOv2
-        'vpt_p1': 5e-3,
-        'lora_r8': 2e-3,
+        'vpt_p5': None,   # fill after sweep
+        'vpt_p1': None,
+        'lora_r8': None,
     },
     'deit3': {
         'vpt_p5': 1e-2,   # default (control — should work)
