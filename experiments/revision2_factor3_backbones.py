@@ -330,19 +330,29 @@ def main():
                 config.lr = vpt_lr
                 vpt_acc = train_and_evaluate(model, train_loader, val_loader, config, device)
             except Exception as e:
-                print(f"    VPT failed ({str(e)[:60]}), using LP as fallback")
-                vpt_acc = 0.0  # Will show as LoRA win
+                print(f"    VPT failed ({str(e)[:80]})")
+                print(f"    → VPT incompatible with this architecture (likely relative position bias)")
+                vpt_acc = -1.0  # Mark as incompatible, not just bad
             del model; torch.cuda.empty_cache()
 
-            # Gradient metric
-            model_tmp = deepcopy(base_model)
-            model_tmp.head = nn.Linear(config.embed_dim, num_classes).to(device)
-            grad_mag = compute_gradient_metric(model_tmp, val_loader, device,
-                                                config=config)
-            del model_tmp; torch.cuda.empty_cache()
+            # Gradient metric (skip if VPT is incompatible)
+            if vpt_acc >= 0:
+                model_tmp = deepcopy(base_model)
+                model_tmp.head = nn.Linear(config.embed_dim, num_classes).to(device)
+                try:
+                    grad_mag = compute_gradient_metric(model_tmp, val_loader, device,
+                                                        config=config)
+                except Exception:
+                    grad_mag = -1.0
+                del model_tmp; torch.cuda.empty_cache()
+            else:
+                grad_mag = -1.0  # VPT incompatible, can't compute gradient
 
-            winner = 'L' if lora_acc > vpt_acc + 0.02 else \
-                     'V' if vpt_acc > lora_acc + 0.02 else 'T'
+            if vpt_acc < 0:
+                winner = 'L (VPT incompatible)'
+            else:
+                winner = 'L' if lora_acc > vpt_acc + 0.02 else \
+                         'V' if vpt_acc > lora_acc + 0.02 else 'T'
 
             all_results[bb_name]['tasks'][task] = {
                 'lora': float(lora_acc), 'vpt': float(vpt_acc),
