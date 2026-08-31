@@ -43,20 +43,18 @@ def discover_backbones():
         'DINOv2': [
             'vit_base_patch14_dinov2.lvd142m',
         ],
+        'DINOv1': [
+            'vit_base_patch16_224.dino',
+            'vit_base_patch8_224.dino',
+        ],
         # Non-DINO self-supervised
-        'MAE': [
-            'vit_base_patch16_224.mae',
-            'vit_base_patch16_mae',
-        ],
-        'BEiTv2': [
-            'beitv2_base_patch16_224.in1k_ft_in22k',
-            'beitv2_base_patch16_224',
-            'beitv2_base_patch16_224.in1k_ft_in22k_in1k',
-        ],
         'BEiT': [
-            'beit_base_patch16_224.in22k_ft_in22k_in1k',
             'beit_base_patch16_224.in22k_ft_in22k',
-            'beit_base_patch16_224',
+            'beit_base_patch16_224.in22k_ft_in22k_in1k',
+        ],
+        'BEiT3': [
+            'beit3_base_patch16_224.in22k_ft_in1k',
+            'beit3_base_patch16_224.indomain_in22k_ft_in1k',
         ],
         # Supervised controls
         'DeiT-III': [
@@ -238,6 +236,7 @@ def main():
         
         # Determine VPT LR based on backbone type
         is_dino = 'dino' in bb_name.lower() or 'dino' in model_name.lower()
+        # DINOv1 uses self-distillation too — should be DINO family
         vpt_lr = BEST_LRS['vpt_dinov2'] if is_dino else BEST_LRS['vpt_default']
 
         bb_results = {'sigma_p': sigma_p, 'model': model_name, 
@@ -326,7 +325,7 @@ def main():
     print(f"\n  KEY QUESTION: Is VPT resistance specific to DINO self-distillation?")
     dino_bbs = [bb for bb, r in all_results.items() if r.get('is_dino', False)]
     ssl_non_dino = [bb for bb, r in all_results.items() 
-                    if not r.get('is_dino', False) and bb in ['MAE', 'BEiTv2', 'BEiT', 'iBOT', 'MoCo-v3', 'DINOv1']]
+                    if not r.get('is_dino', False) and bb in ['MAE', 'BEiT', 'BEiTv2', 'BEiT3', 'iBOT', 'MoCo-v3', 'DINOv1']]
     sup_bbs = [bb for bb, r in all_results.items()
                if bb in ['DeiT-III', 'Supervised']]
     
