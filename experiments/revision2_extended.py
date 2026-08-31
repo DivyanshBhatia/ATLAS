@@ -14,6 +14,12 @@ Usage:
 
     # Just the DeiT-III LR sweep:
     python revision2_extended.py --mode sweep
+
+    # Specific backbones/tasks:
+    python revision2_extended.py --mode fair --backbones dinov2 deit3 --tasks eurosat dtd
+
+    # Resume after crash:
+    python revision2_extended.py --resume
 """
 import sys
 sys.path.insert(0, '.')
@@ -61,13 +67,14 @@ def run_method(base_model, config, method, capacity, lr, train_loader, val_loade
     return acc
 
 
-def run_fair_comparison(device, config, backbones, tasks):
+def run_fair_comparison(device, config, backbones, tasks, existing_results=None):
     """Experiment #2: Fair comparison on extended task set."""
     print("\n" + "=" * 70)
     print("EXPERIMENT #2: Extended Fair Comparison")
     print("=" * 70)
 
-    all_results = {}
+    SAVE_PATH = 'results/revision2_extended_fair.json'
+    all_results = existing_results or {}
 
     for bb_key in backbones:
         if bb_key not in BACKBONES:
@@ -75,6 +82,18 @@ def run_fair_comparison(device, config, backbones, tasks):
         bb = BACKBONES[bb_key]
         img_size = bb['img_size']
         lrs = BEST_LRS.get(bb_key, {'lora': 1e-3, 'vpt_p5': 1e-2, 'vpt_p1': 1e-2})
+
+        # Check which tasks are done
+        pending_tasks = []
+        for task in tasks:
+            key = f"{bb_key}_{task}"
+            if key in all_results:
+                print(f"  {key}: already done, skipping")
+            elif task in TASKS:
+                pending_tasks.append(task)
+        
+        if not pending_tasks:
+            continue
 
         print(f"\n  Loading {bb['name']} (img_size={img_size})...")
         base_model = timm.create_model(bb['model'], pretrained=True,
@@ -84,9 +103,7 @@ def run_fair_comparison(device, config, backbones, tasks):
         config.num_heads = base_model.blocks[0].attn.num_heads
         config.head_dim = base_model.embed_dim // base_model.blocks[0].attn.num_heads
 
-        for task in tasks:
-            if task not in TASKS:
-                continue
+        for task in pending_tasks:
             num_classes = TASKS[task][0]
             config.num_classes = num_classes
 
@@ -140,6 +157,11 @@ def run_fair_comparison(device, config, backbones, tasks):
             winner = 'LoRA' if gap > 0.02 else 'VPT' if gap < -0.02 else 'TIE'
             print(f"\n    LoRA={lora:.3f} vs best VPT({best_vpt_name})={best_vpt:.3f} "
                   f"→ gap={gap:+.3f} → {winner}")
+
+            # INCREMENTAL SAVE
+            os.makedirs('results', exist_ok=True)
+            with open(SAVE_PATH, 'w') as f:
+                json.dump(all_results, f, indent=2, default=str)
 
         del base_model; torch.cuda.empty_cache()
 
@@ -255,6 +277,14 @@ def run_deit3_vpt_sweep(device, config):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='both', choices=['both', 'fair', 'sweep'])
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from saved results')
+    parser.add_argument('--backbones', nargs='+', default=['dinov2', 'deit3'],
+                        help='Backbones for fair comparison')
+    parser.add_argument('--tasks', nargs='+', default=['eurosat', 'dtd', 'gtsrb'],
+                        help='Tasks for fair comparison')
+    parser.add_argument('--sweep_tasks', nargs='+', default=['cifar100', 'svhn', 'dtd'],
+                        help='Tasks for DeiT-III sweep')
     args = parser.parse_args()
 
     device = setup_device()
@@ -264,10 +294,18 @@ def main():
     all_results = {}
 
     if args.mode in ['both', 'fair']:
+        # Load existing fair results if resuming
+        existing_fair = {}
+        if args.resume and os.path.exists('results/revision2_extended_fair.json'):
+            with open('results/revision2_extended_fair.json') as f:
+                existing_fair = json.load(f)
+            print(f"  Resuming fair comparison: {len(existing_fair)} pairs done")
+
         fair_results = run_fair_comparison(
             device, config,
-            backbones=['dinov2', 'deit3'],
-            tasks=['eurosat', 'dtd', 'gtsrb']
+            backbones=args.backbones,
+            tasks=args.tasks,
+            existing_results=existing_fair
         )
         all_results['fair_comparison'] = fair_results
 

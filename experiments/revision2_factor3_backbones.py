@@ -179,17 +179,31 @@ def compute_sigma_invariant(model):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--backbones', nargs='+', default=None,
-                        help='Subset of backbones to test')
+                        help='Subset of backbones to test (e.g., DINOv1 BEiT DeiT-III)')
     parser.add_argument('--tasks', nargs='+', default=TEST_TASKS)
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from saved results, skip completed backbone-task pairs')
     args = parser.parse_args()
 
     device = setup_device()
     config = ExperimentConfig()
     config.epochs = 100
 
+    SAVE_PATH = 'results/revision2_factor3.json'
+
     print("=" * 70)
     print("Factor 3 Generalization: Self-Supervised Backbone Test")
     print("=" * 70)
+
+    # Load existing results if resuming
+    all_results = {}
+    if args.resume and os.path.exists(SAVE_PATH):
+        with open(SAVE_PATH) as f:
+            all_results = json.load(f)
+        print(f"\n  Resuming: loaded {len(all_results)} backbones from {SAVE_PATH}")
+        for bb, r in all_results.items():
+            tasks_done = list(r.get('tasks', {}).keys())
+            print(f"    {bb}: {tasks_done}")
 
     # Discover available backbones
     print("\n  Discovering available backbones...")
@@ -205,12 +219,23 @@ def main():
     if args.backbones:
         available = {k: v for k, v in available.items() if k in args.backbones}
 
-    all_results = {}
     img_size = 224  # consistent across all backbones
 
     for bb_name, model_name in available.items():
+        # Check which tasks are already done for this backbone
+        done_tasks = []
+        if bb_name in all_results and 'tasks' in all_results[bb_name]:
+            done_tasks = list(all_results[bb_name]['tasks'].keys())
+        
+        pending_tasks = [t for t in args.tasks if t in TASKS and t not in done_tasks]
+        
+        if not pending_tasks:
+            print(f"\n  {bb_name}: all tasks done, skipping")
+            continue
+
         print(f"\n{'='*55}")
         print(f"  Backbone: {bb_name} ({model_name})")
+        print(f"  Pending tasks: {pending_tasks}")
         print(f"{'='*55}")
 
         try:
@@ -239,13 +264,16 @@ def main():
         # DINOv1 uses self-distillation too — should be DINO family
         vpt_lr = BEST_LRS['vpt_dinov2'] if is_dino else BEST_LRS['vpt_default']
 
-        bb_results = {'sigma_p': sigma_p, 'model': model_name, 
-                      'vpt_lr': vpt_lr, 'is_dino': is_dino, 'tasks': {}}
+        # Initialize or resume backbone results
+        if bb_name not in all_results:
+            all_results[bb_name] = {
+                'sigma_p': float(sigma_p), 'model': model_name,
+                'vpt_lr': float(vpt_lr), 'is_dino': is_dino, 'tasks': {}
+            }
+        
         print(f"  σ²_P (invariant) = {sigma_p:.4f}, VPT LR = {vpt_lr:.0e}")
 
-        for task in args.tasks:
-            if task not in TASKS:
-                continue
+        for task in pending_tasks:
             num_classes = TASKS[task][0]
 
             ds = load_dataset(task, img_size, max_samples=1000)
@@ -284,7 +312,7 @@ def main():
             winner = 'L' if lora_acc > vpt_acc + 0.02 else \
                      'V' if vpt_acc > lora_acc + 0.02 else 'T'
 
-            bb_results['tasks'][task] = {
+            all_results[bb_name]['tasks'][task] = {
                 'lora': float(lora_acc), 'vpt': float(vpt_acc),
                 'winner': winner, 'grad_mag': float(grad_mag)
             }
@@ -292,19 +320,27 @@ def main():
             print(f"    {task:<12s}: LoRA={lora_acc:.3f} VPT={vpt_acc:.3f} "
                   f"→ {winner}  grad={grad_mag:.2f}")
 
-        # Summary for this backbone
+            # INCREMENTAL SAVE after each task
+            os.makedirs('results', exist_ok=True)
+            with open(SAVE_PATH, 'w') as f:
+                json.dump(all_results, f, indent=2, default=str)
+
+        # Update summary for this backbone
         wins = {'L': 0, 'T': 0, 'V': 0}
-        for t, r in bb_results['tasks'].items():
+        for t, r in all_results[bb_name]['tasks'].items():
             wins[r['winner']] += 1
-        bb_results['wins'] = wins
+        all_results[bb_name]['wins'] = wins
         
-        grad_values = [r['grad_mag'] for r in bb_results['tasks'].values()]
-        bb_results['mean_grad'] = float(np.mean(grad_values)) if grad_values else 0
+        grad_values = [r['grad_mag'] for r in all_results[bb_name]['tasks'].values()]
+        all_results[bb_name]['mean_grad'] = float(np.mean(grad_values)) if grad_values else 0
 
         print(f"\n  L/T/V = {wins['L']}/{wins['T']}/{wins['V']}, "
-              f"mean grad = {bb_results['mean_grad']:.2f}")
+              f"mean grad = {all_results[bb_name]['mean_grad']:.2f}")
 
-        all_results[bb_name] = bb_results
+        # Save after backbone complete
+        with open(SAVE_PATH, 'w') as f:
+            json.dump(all_results, f, indent=2, default=str)
+
         del base_model; torch.cuda.empty_cache()
 
     # Cross-backbone summary
