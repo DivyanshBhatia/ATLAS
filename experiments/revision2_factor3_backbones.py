@@ -31,83 +31,47 @@ import os
 from copy import deepcopy
 
 from config import ExperimentConfig, setup_device
-from exp2_comparison import apply_lora, apply_vpt, train_and_evaluate
+from exp2_comparison import apply_lora as _apply_lora_original, apply_vpt, train_and_evaluate, LoRALayer
 from run_all_backbones import TASKS, load_dataset
 from torch.utils.data import DataLoader, random_split
 
 
-def apply_lora_beit(model, rank, config):
-    """BEiT-compatible LoRA: merges LoRA into weights instead of wrapping.
+# Patch LoRALayer with weight/bias properties for BEiT compatibility
+if not hasattr(LoRALayer, 'weight'):
+    @property
+    def _lora_weight(self):
+        """Return effective weight (original + BA) for models that access .weight directly."""
+        return self.original.weight + (self.lora_A.T @ self.lora_B.T)
     
-    BEiT accesses self.qkv.weight directly via F.linear(), so we can't
-    use a wrapper module. Instead, we:
-    1. Add learnable A, B parameters to each block
-    2. Use a forward hook to add BA to the qkv weight before each forward pass
-    """
-    for param in model.parameters():
-        param.requires_grad_(False)
+    @property
+    def _lora_bias(self):
+        return self.original.bias
     
-    d = config.embed_dim
+    @property
+    def _lora_in_features(self):
+        return self.original.in_features
     
-    for i, block in enumerate(model.blocks):
-        attn = block.attn
-        qkv = attn.qkv
-        d_out = qkv.weight.shape[0]  # 3*d
-        d_in = qkv.weight.shape[1]   # d
-        
-        # Store original weight
-        attn._original_qkv_weight = qkv.weight.data.clone()
-        
-        # Add LoRA parameters
-        attn.lora_A = nn.Parameter(torch.randn(rank, d_in) * 0.01)
-        attn.lora_B = nn.Parameter(torch.zeros(d_out, rank))
-        
-        # Hook that adds BA to weight before forward
-        def make_hook(attn_module):
-            def hook(module, input):
-                # Reconstruct weight = original + BA
-                delta = attn_module.lora_B @ attn_module.lora_A
-                module.qkv.weight.data = attn_module._original_qkv_weight + delta
-            return hook
-        
-        block.register_forward_pre_hook(make_hook(attn))
+    @property
+    def _lora_out_features(self):
+        return self.original.out_features
     
-    # Also handle output projection if it has the same issue
-    for block in model.blocks:
-        attn = block.attn
-        if hasattr(attn, 'proj') and hasattr(attn.proj, 'weight'):
-            proj = attn.proj
-            d_out_p = proj.weight.shape[0]
-            d_in_p = proj.weight.shape[1]
-            
-            attn._original_proj_weight = proj.weight.data.clone()
-            attn.lora_proj_A = nn.Parameter(torch.randn(rank, d_in_p) * 0.01)
-            attn.lora_proj_B = nn.Parameter(torch.zeros(d_out_p, rank))
-            
-            def make_proj_hook(attn_module):
-                def hook(module, input):
-                    delta = attn_module.lora_proj_B @ attn_module.lora_proj_A
-                    module.attn.proj.weight.data = attn_module._original_proj_weight + delta
-                return hook
-            
-            block.register_forward_pre_hook(make_proj_hook(attn))
-    
-    # Enable gradients on LoRA params and head
-    for name, param in model.named_parameters():
-        if 'lora_' in name or 'head' in name:
-            param.requires_grad_(True)
-    
-    return model
+    LoRALayer.weight = _lora_weight
+    LoRALayer.bias = _lora_bias
+    LoRALayer.in_features = _lora_in_features
+    LoRALayer.out_features = _lora_out_features
+
+
+def apply_lora(model, rank, config):
+    """Apply LoRA with BEiT compatibility via weight property patch."""
+    return _apply_lora_original(model, rank, config)
 
 
 def is_beit_model(model):
-    """Check if model uses BEiT-style attention (accesses qkv.weight directly)."""
+    """Check if model uses BEiT-style attention."""
     if hasattr(model, 'blocks') and len(model.blocks) > 0:
         block = model.blocks[0]
-        # BEiT blocks have a specific structure
         module_name = type(block).__module__
-        class_name = type(block).__name__
-        if 'beit' in module_name.lower() or 'beit' in class_name.lower():
+        if 'beit' in module_name.lower():
             return True
     return False
 
@@ -351,10 +315,7 @@ def main():
             # LoRA_r8
             model = deepcopy(base_model)
             model.head = nn.Linear(config.embed_dim, num_classes).to(device)
-            if is_beit_model(model):
-                model = apply_lora_beit(model, 8, config)
-            else:
-                model = apply_lora(model, 8, config)
+            model = apply_lora(model, 8, config)
             model = model.to(device)
             config.lr = BEST_LRS['lora']
             lora_acc = train_and_evaluate(model, train_loader, val_loader, config, device)
