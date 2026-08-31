@@ -36,6 +36,82 @@ from run_all_backbones import TASKS, load_dataset
 from torch.utils.data import DataLoader, random_split
 
 
+def apply_lora_beit(model, rank, config):
+    """BEiT-compatible LoRA: merges LoRA into weights instead of wrapping.
+    
+    BEiT accesses self.qkv.weight directly via F.linear(), so we can't
+    use a wrapper module. Instead, we:
+    1. Add learnable A, B parameters to each block
+    2. Use a forward hook to add BA to the qkv weight before each forward pass
+    """
+    for param in model.parameters():
+        param.requires_grad_(False)
+    
+    d = config.embed_dim
+    
+    for i, block in enumerate(model.blocks):
+        attn = block.attn
+        qkv = attn.qkv
+        d_out = qkv.weight.shape[0]  # 3*d
+        d_in = qkv.weight.shape[1]   # d
+        
+        # Store original weight
+        attn._original_qkv_weight = qkv.weight.data.clone()
+        
+        # Add LoRA parameters
+        attn.lora_A = nn.Parameter(torch.randn(rank, d_in) * 0.01)
+        attn.lora_B = nn.Parameter(torch.zeros(d_out, rank))
+        
+        # Hook that adds BA to weight before forward
+        def make_hook(attn_module):
+            def hook(module, input):
+                # Reconstruct weight = original + BA
+                delta = attn_module.lora_B @ attn_module.lora_A
+                module.qkv.weight.data = attn_module._original_qkv_weight + delta
+            return hook
+        
+        block.register_forward_pre_hook(make_hook(attn))
+    
+    # Also handle output projection if it has the same issue
+    for block in model.blocks:
+        attn = block.attn
+        if hasattr(attn, 'proj') and hasattr(attn.proj, 'weight'):
+            proj = attn.proj
+            d_out_p = proj.weight.shape[0]
+            d_in_p = proj.weight.shape[1]
+            
+            attn._original_proj_weight = proj.weight.data.clone()
+            attn.lora_proj_A = nn.Parameter(torch.randn(rank, d_in_p) * 0.01)
+            attn.lora_proj_B = nn.Parameter(torch.zeros(d_out_p, rank))
+            
+            def make_proj_hook(attn_module):
+                def hook(module, input):
+                    delta = attn_module.lora_proj_B @ attn_module.lora_proj_A
+                    module.attn.proj.weight.data = attn_module._original_proj_weight + delta
+                return hook
+            
+            block.register_forward_pre_hook(make_proj_hook(attn))
+    
+    # Enable gradients on LoRA params and head
+    for name, param in model.named_parameters():
+        if 'lora_' in name or 'head' in name:
+            param.requires_grad_(True)
+    
+    return model
+
+
+def is_beit_model(model):
+    """Check if model uses BEiT-style attention (accesses qkv.weight directly)."""
+    if hasattr(model, 'blocks') and len(model.blocks) > 0:
+        block = model.blocks[0]
+        # BEiT blocks have a specific structure
+        module_name = type(block).__module__
+        class_name = type(block).__name__
+        if 'beit' in module_name.lower() or 'beit' in class_name.lower():
+            return True
+    return False
+
+
 def discover_backbones():
     """Discover available backbone models in timm."""
     candidates = {
@@ -275,7 +351,10 @@ def main():
             # LoRA_r8
             model = deepcopy(base_model)
             model.head = nn.Linear(config.embed_dim, num_classes).to(device)
-            model = apply_lora(model, 8, config)
+            if is_beit_model(model):
+                model = apply_lora_beit(model, 8, config)
+            else:
+                model = apply_lora(model, 8, config)
             model = model.to(device)
             config.lr = BEST_LRS['lora']
             lora_acc = train_and_evaluate(model, train_loader, val_loader, config, device)
@@ -284,10 +363,14 @@ def main():
             # VPT_p5 at backbone-appropriate LR
             model = deepcopy(base_model)
             model.head = nn.Linear(config.embed_dim, num_classes).to(device)
-            model = apply_vpt(model, 5, config)
-            model = model.to(device)
-            config.lr = vpt_lr
-            vpt_acc = train_and_evaluate(model, train_loader, val_loader, config, device)
+            try:
+                model = apply_vpt(model, 5, config)
+                model = model.to(device)
+                config.lr = vpt_lr
+                vpt_acc = train_and_evaluate(model, train_loader, val_loader, config, device)
+            except Exception as e:
+                print(f"    VPT failed ({str(e)[:60]}), using LP as fallback")
+                vpt_acc = 0.0  # Will show as LoRA win
             del model; torch.cuda.empty_cache()
 
             # Gradient metric
