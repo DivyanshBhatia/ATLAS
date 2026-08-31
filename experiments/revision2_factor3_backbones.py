@@ -67,30 +67,18 @@ def discover_backbones():
         ],
     }
     
-    # Try to find iBOT and DINOv1
-    for name_pattern in ['*ibot*', '*dino*']:
+    # Only discover additional models — don't override hardcoded ones
+    # Filter to ViT models only (exclude ConvNeXt, Hiera, etc.)
+    for name_pattern in ['*ibot*', '*moco*']:
         try:
             models = timm.list_models(name_pattern, pretrained=True)
-            if 'ibot' in name_pattern:
-                base_models = [m for m in models if 'base' in m]
-                if base_models:
-                    candidates['iBOT'] = base_models[:3]
-            elif 'dino' in name_pattern:
-                # DINOv1 only (exclude v2)
-                v1_models = [m for m in models if 'base' in m and 'v2' not in m and 'dinov2' not in m]
-                if v1_models:
-                    candidates['DINOv1'] = v1_models[:3]
+            vit_models = [m for m in models if m.startswith('vit_') and 'base' in m]
+            if name_pattern == '*ibot*' and vit_models:
+                candidates['iBOT'] = vit_models[:3]
+            elif name_pattern == '*moco*' and vit_models:
+                candidates['MoCo-v3'] = vit_models[:3]
         except:
             pass
-    
-    # Try MoCo
-    try:
-        moco_models = timm.list_models('*moco*', pretrained=True)
-        base_moco = [m for m in moco_models if 'base' in m]
-        if base_moco:
-            candidates['MoCo-v3'] = base_moco[:3]
-    except:
-        pass
     
     # Resolve: try each candidate, keep first that works
     available = {}
