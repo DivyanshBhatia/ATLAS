@@ -105,6 +105,10 @@ def discover_backbones():
             'vit_base_patch16_224.augreg_in1k',
             'vit_base_patch16_224.augreg2_in21k_ft_in1k',
         ],
+        'CLIP': [
+            'vit_base_patch16_clip_224.openai',
+            'vit_base_patch16_clip_224',
+        ],
     }
     
     # Only discover additional models — don't override hardcoded ones
@@ -405,16 +409,19 @@ def main():
     ssl_non_dino = [bb for bb, r in all_results.items() 
                     if not r.get('is_dino', False) and bb in ['MAE', 'BEiT', 'BEiTv2', 'BEiT3', 'iBOT', 'MoCo-v3', 'DINOv1']]
     sup_bbs = [bb for bb, r in all_results.items()
-               if bb in ['DeiT-III', 'Supervised']]
+               if bb in ['DeiT-III', 'Supervised', 'CLIP']]
     
     for group_name, group in [('DINO family', dino_bbs), 
                                ('SSL non-DINO', ssl_non_dino),
                                ('Supervised', sup_bbs)]:
         if not group:
             continue
-        vpt_wins = sum(all_results[bb]['wins'].get('V', 0) for bb in group)
-        total = sum(sum(all_results[bb]['wins'].values()) for bb in group)
-        print(f"    {group_name:<20s}: {vpt_wins}/{total} VPT wins")
+        vpt_wins = sum(all_results[bb].get('wins', {}).get('V', 0) for bb in group)
+        total = sum(sum(all_results[bb].get('wins', {}).values()) for bb in group if 'wins' in all_results[bb])
+        if total > 0:
+            print(f"    {group_name:<20s}: {vpt_wins}/{total} VPT wins")
+        else:
+            print(f"    {group_name:<20s}: no completed results")
 
     os.makedirs('results', exist_ok=True)
     with open('results/revision2_factor3.json', 'w') as f:
