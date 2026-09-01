@@ -291,10 +291,11 @@ def main():
         # Compute invariant σ²_P
         sigma_p = compute_sigma_invariant(base_model)
         
-        # Determine VPT LR based on backbone type
+        # Determine VPT LR based on σ²_P, not backbone identity
+        # Low σ²_P backbones need lower VPT LR (discovered in LR sweep)
         is_dino = 'dino' in bb_name.lower() or 'dino' in model_name.lower()
-        # DINOv1 uses self-distillation too — should be DINO family
-        vpt_lr = BEST_LRS['vpt_dinov2'] if is_dino else BEST_LRS['vpt_default']
+        low_sigma = sigma_p < 0.5  # CLIP=0.18, DINOv2=0.22, DINOv1=0.19 all below
+        vpt_lr = BEST_LRS['vpt_dinov2'] if low_sigma else BEST_LRS['vpt_default']
 
         # Initialize or resume backbone results
         if bb_name not in all_results:
