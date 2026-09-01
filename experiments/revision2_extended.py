@@ -46,7 +46,7 @@ BEST_LRS = {
     'dinov2reg':  {'lora': 2e-3, 'vpt_p5': 1e-3, 'vpt_p1': 5e-3},
     'deit3':      {'lora': 1e-3, 'vpt_p5': 1e-2, 'vpt_p1': 1e-2},
     'supervised': {'lora': 1e-3, 'vpt_p5': 1e-2, 'vpt_p1': 1e-2},
-    'clip':       {'lora': 1e-3, 'vpt_p5': 1e-2, 'vpt_p1': 1e-2},
+    'clip':       {'lora': 1e-3, 'vpt_p5': 1e-3, 'vpt_p1': 5e-3},  # low σ²_P → low VPT LR
 }
 
 # DeiT-III VPT LR sweep range
