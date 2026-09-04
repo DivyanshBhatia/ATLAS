@@ -51,7 +51,7 @@ BACKBONES = {
 # ============================================================
 # EXPERIMENT 1: LoRA LR Sweep on All Backbones
 # ============================================================
-def run_lora_sweep(device, config):
+def run_lora_sweep(device, config, backbone_filter=None, task_filter=None):
     """Sweep LoRA LR on CLIP, DeiT-III, Supervised. 3 seeds at best LR."""
     SAVE_PATH = 'results/revision3_lora_sweep.json'
     
@@ -60,9 +60,11 @@ def run_lora_sweep(device, config):
         with open(SAVE_PATH) as f:
             all_results = json.load(f)
 
-    for bb_name, (model_name, sigma_p) in BACKBONES.items():
+    backbones_to_run = {k: v for k, v in BACKBONES.items() if k in (backbone_filter or BACKBONES.keys())}
+
+    for bb_name, (model_name, sigma_p) in backbones_to_run.items():
         done_tasks = list(all_results.get(bb_name, {}).get('tasks', {}).keys())
-        pending = [t for t in TASKS_5 if t in TASKS and t not in done_tasks]
+        pending = [t for t in (task_filter or TASKS_5) if t in TASKS and t not in done_tasks]
         if not pending:
             print(f"\n  {bb_name}: all done"); continue
 
@@ -312,151 +314,59 @@ def run_sigma_ln(device, config):
 # ============================================================
 # EXPERIMENT 3: iBOT Backbone Test
 # ============================================================
-def run_ibot(device, config, checkpoint_path=None):
-    """Load the official iBOT ViT-B/16 backbone and verify its checkpoint.
-
-    iBOT is not provided as a timm model or as the DINO torch.hub model.
-    This function imports the official bytedance/ibot implementation directly.
-    """
+def run_ibot(device, config):
+    """Test iBOT (self-distillation + MIM) as a control."""
     print(f"\n{'='*60}")
     print("iBOT BACKBONE TEST")
     print(f"{'='*60}")
 
-    # The official iBOT repository contains the model factory (models.vit_base).
-    # Keep the repository path configurable so this also works outside Colab.
-    ibot_root = os.environ.get("IBOT_ROOT", "/content/ibot")
-    if ibot_root not in sys.path:
-        sys.path.insert(0, ibot_root)
+    # Try to find iBOT in timm
+    import timm
+    ibot_candidates = [
+        'vit_base_patch16_224.ibot',
+        'vit_base_patch16_ibot',
+    ]
+    
+    # Also check torch hub
+    model = None
+    source = None
+    
+    for name in ibot_candidates:
+        try:
+            model = timm.create_model(name, pretrained=True, img_size=224)
+            source = f"timm:{name}"
+            break
+        except:
+            pass
 
-    try:
-        import models as ibot_models
-    except Exception as e:
-        print(f"  ERROR: could not import official iBOT models from {ibot_root}")
-        print(f"  {type(e).__name__}: {e}")
-        print("  Clone the official repository, e.g.:")
-        print("    git clone https://github.com/bytedance/ibot.git /content/ibot")
+    if model is None:
+        # Try torch hub
+        try:
+            model = torch.hub.load('facebookresearch/dino', 'dino_vitb16', pretrained=True)
+            source = "hub:facebookresearch/dino/dino_vitb16"
+            print(f"  Note: loaded DINOv1 from hub instead of iBOT (iBOT not available)")
+            print(f"  iBOT is not available in timm or torch hub.")
+            print(f"  Consider downloading from: https://github.com/bytedance/ibot")
+            return
+        except:
+            pass
+
+    if model is None:
+        print("  iBOT not available. Try downloading manually from bytedance/ibot")
+        print("  or use DINOv1 as the closest available self-distillation control.")
         return
 
-    if "vit_base" not in ibot_models.__dict__:
-        print("  ERROR: official iBOT models package does not expose vit_base")
-        print(f"  Imported models from: {ibot_models.__file__}")
-        return
-
-    try:
-        model = ibot_models.__dict__["vit_base"](
-            patch_size=16,
-            num_classes=0,
-        )
-    except Exception as e:
-        print("  ERROR: failed to construct iBOT ViT-B/16")
-        print(f"  {type(e).__name__}: {e}")
-        return
-
-    print(f"  Architecture: {type(model).__name__}")
-    print(f"  iBOT models: {ibot_models.__file__}")
-
-    # Resolve checkpoint path. Do not silently download from a placeholder URL.
-    candidates = []
-    if checkpoint_path:
-        candidates.append(checkpoint_path)
-    candidates.extend([
-        os.path.join(ibot_root, "checkpoint_teacher.pth"),
-        "/content/checkpoint_teacher.pth",
-        "checkpoint_teacher.pth",
-    ])
-
-    checkpoint_path = next((x for x in candidates if x and os.path.isfile(x)), None)
-    if checkpoint_path is None:
-        print("  ERROR: iBOT checkpoint not found.")
-        print("  Expected one of:")
-        for x in candidates:
-            print(f"    {x}")
-        print("  Pass --ibot_checkpoint /path/to/checkpoint_teacher.pth")
-        return
-
-    print(f"  Checkpoint: {checkpoint_path}")
-
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    except Exception as e:
-        print("  ERROR: failed to read checkpoint")
-        print(f"  {type(e).__name__}: {e}")
-        return
-
-    # Official/repacked checkpoints may store weights under different keys.
-    if isinstance(checkpoint, dict):
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        elif "teacher" in checkpoint and isinstance(checkpoint["teacher"], dict):
-            state_dict = checkpoint["teacher"]
-        else:
-            state_dict = checkpoint
-    else:
-        print(f"  ERROR: unsupported checkpoint type: {type(checkpoint)}")
-        return
-
-    # Remove common wrappers used by DataParallel / iBOT training checkpoints.
-    cleaned = {}
-    for key, value in state_dict.items():
-        new_key = key
-        for prefix in ("module.", "teacher.", "backbone."):
-            if new_key.startswith(prefix):
-                new_key = new_key[len(prefix):]
-        cleaned[new_key] = value
-
-    # num_classes=0 creates a feature backbone, so discard training heads if present.
-    head_prefixes = (
-        "head.",
-        "last_layer.",
-        "student_head.",
-        "teacher_head.",
-        "patch_embed",
-    )
-    # Keep patch_embed: it is part of the backbone. Only remove classifier heads.
-    cleaned = {
-        k: v for k, v in cleaned.items()
-        if not k.startswith(("head.", "last_layer.", "student_head.", "teacher_head."))
-    }
-
-    try:
-        msg = model.load_state_dict(cleaned, strict=False)
-    except Exception as e:
-        print("  ERROR: checkpoint does not match the official iBOT ViT-B/16 architecture")
-        print(f"  {type(e).__name__}: {e}")
-        return
-
-    missing = list(getattr(msg, "missing_keys", []))
-    unexpected = list(getattr(msg, "unexpected_keys", []))
-
-    print(f"  Missing keys: {len(missing)}")
-    print(f"  Unexpected keys: {len(unexpected)}")
-    if missing:
-        print(f"  First missing: {missing[:10]}")
-    if unexpected:
-        print(f"  First unexpected: {unexpected[:10]}")
-
-    model = model.to(device).eval()
-
-    # Sanity-check one forward pass with the expected ViT-B/16 input shape.
-    try:
-        x = torch.randn(1, 3, 224, 224, device=device)
-        with torch.no_grad():
-            y = model(x)
-        print(f"  Forward pass: OK, output shape={tuple(y.shape) if hasattr(y, 'shape') else type(y)}")
-    except Exception as e:
-        print("  ERROR: iBOT forward pass failed")
-        print(f"  {type(e).__name__}: {e}")
-        return
-
-    print("  SUCCESS: official iBOT ViT-B/16 backbone loaded.")
-    return model
+    print(f"  Loaded: {source}")
+    # Run same protocol as Factor 3...
+    # (Similar to revision2_ssl_control.py)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='all', choices=['all', 'lora_sweep', 'sigma_ln', 'ibot'])
+    parser.add_argument('--tasks', nargs='+', default=TASKS_5)
+    parser.add_argument('--backbones', nargs='+', default=list(BACKBONES.keys()))
     parser.add_argument('--resume', action='store_true')
-    parser.add_argument('--ibot_checkpoint', default=None, help='Path to official iBOT teacher/backbone checkpoint')
     args = parser.parse_args()
 
     device = setup_device()
@@ -464,13 +374,13 @@ def main():
     config.epochs = 100
 
     if args.mode in ['all', 'lora_sweep']:
-        run_lora_sweep(device, config)
+        run_lora_sweep(device, config, args.backbones, args.tasks)
 
     if args.mode in ['all', 'sigma_ln']:
         run_sigma_ln(device, config)
 
     if args.mode in ['all', 'ibot']:
-        run_ibot(device, config, checkpoint_path=args.ibot_checkpoint)
+        run_ibot(device, config)
 
 
 if __name__ == '__main__':
