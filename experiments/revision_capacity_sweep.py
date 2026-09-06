@@ -36,23 +36,71 @@ BACKBONES = {
     'DeiT-III': ('deit3_base_patch16_224', 1.04),
     'Supervised': ('vit_base_patch16_224.augreg_in1k', 1.60),
     'MAE': ('vit_base_patch16_224.mae', 1.76),
+    'DINOv1': ('vit_base_patch16_224.dino', 0.19),
+    'MoCo-v3': (None, 2.31),
+    'iBOT': (None, 0.15),
 }
 
 # Best VPT LR per backbone (from our sweeps)
 BEST_VPT_LR = {
     'DINOv2': 1e-3, 'CLIP': 2e-3, 'DeiT-III': 5e-3,
-    'Supervised': 5e-3, 'MAE': 1e-2,
+    'Supervised': 5e-3, 'MAE': 1e-2, 'DINOv1': 1e-3,
+    'MoCo-v3': 1e-2, 'iBOT': 1e-3,
 }
 
 
-def load_model(name, device):
-    return timm.create_model(BACKBONES[name][0], pretrained=True, img_size=224).to(device)
+def load_model(name, device, ibot_checkpoint=None):
+    if name == 'MoCo-v3':
+        model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
+        url = 'https://dl.fbaipublicfiles.com/moco-v3/vit-b-300ep/vit-b-300ep.pth.tar'
+        sd = torch.hub.load_state_dict_from_url(url, map_location='cpu')
+        if 'state_dict' in sd:
+            sd = {k.replace('module.', '').replace('base_encoder.', ''): v
+                  for k, v in sd['state_dict'].items()}
+        msg = model.load_state_dict(sd, strict=False)
+        print(f"  MoCo-v3 loaded (missing: {len(msg.missing_keys)}, unexpected: {len(msg.unexpected_keys)})")
+        return model.to(device)
+    elif name == 'iBOT':
+        model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
+        # Find checkpoint
+        candidates = [ibot_checkpoint] if ibot_checkpoint else []
+        candidates.extend([
+            '/content/ibot/checkpoint_teacher.pth',
+            '/content/checkpoint_teacher.pth',
+            'checkpoint_teacher.pth',
+        ])
+        ckpt_path = next((x for x in candidates if x and os.path.isfile(x)), None)
+        if ckpt_path is None:
+            raise FileNotFoundError(f"iBOT checkpoint not found. Tried: {candidates}")
+        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+            sd = checkpoint['state_dict']
+        elif isinstance(checkpoint, dict) and 'teacher' in checkpoint:
+            sd = checkpoint['teacher']
+        else:
+            sd = checkpoint
+        cleaned = {}
+        for key, value in sd.items():
+            new_key = key
+            for prefix in ('module.', 'teacher.', 'backbone.'):
+                if new_key.startswith(prefix):
+                    new_key = new_key[len(prefix):]
+            if new_key.startswith(('head.', 'last_layer.', 'student_head.', 'teacher_head.')):
+                continue
+            cleaned[new_key] = value
+        msg = model.load_state_dict(cleaned, strict=False)
+        print(f"  iBOT loaded from {ckpt_path} (missing: {len(msg.missing_keys)}, unexpected: {len(msg.unexpected_keys)})")
+        return model.to(device)
+    else:
+        return timm.create_model(BACKBONES[name][0], pretrained=True, img_size=224).to(device)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--backbones', nargs='+', default=['DINOv2', 'CLIP', 'DeiT-III'])
     parser.add_argument('--tasks', nargs='+', default=TASKS_5)
+    parser.add_argument('--ibot_checkpoint', default=None,
+                        help='Path to iBOT checkpoint_teacher.pth')
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
 
@@ -79,7 +127,7 @@ def main():
         print(f"  Pending: {pending}")
         print(f"{'='*55}")
 
-        base_model = load_model(bb_name, device)
+        base_model = load_model(bb_name, device, ibot_checkpoint=args.ibot_checkpoint)
         config.embed_dim = base_model.embed_dim
         config.num_layers = len(base_model.blocks)
         config.num_heads = base_model.blocks[0].attn.num_heads
