@@ -1,17 +1,10 @@
 """
 VPT Capacity LR Sweep: Does the p=50 crash survive LR tuning?
 
-Reviewer blocking issue: "you declared 'more capacity hurts' without sweeping LR
-at the new capacity. You need at least a 3-5 point LR sweep at p=20 and p=50."
-
-If p=50 still crashes after LR tuning → finding is real (structural).
-If p=50 recovers with different LR → finding was our own confound.
-
 Usage:
     cd /content/ATLAS
-    python experiments/revision_capacity_lr_sweep.py --backbones DINOv2 CLIP DeiT-III
-    python experiments/revision_capacity_lr_sweep.py --backbones DINOv2 --tasks cifar100
-    python experiments/revision_capacity_lr_sweep.py --backbones MoCo-v3 --tasks cifar100
+    python experiments/revision_capacity_lr_sweep.py --backbones DINOv2 CLIP MoCo-v3 --tasks cifar100
+    python experiments/revision_capacity_lr_sweep.py --backbones iBOT --tasks cifar100 --ibot_checkpoint /content/checkpoint_teacher.pth
 """
 import sys
 sys.path.insert(0, '.')
@@ -43,18 +36,22 @@ BACKBONES = {
     'MAE': ('vit_base_patch16_224.mae', 1.76),
     'DINOv1': ('vit_base_patch16_224.dino', 0.19),
     'MoCo-v3': (None, 2.31),
+    'iBOT': (None, 0.15),
 }
 
-# Best LoRA accuracy per backbone-task (from main table, for comparison)
 LORA_BEST = {
     'DINOv2': {'cifar100': 0.835, 'svhn': 0.877, 'gtsrb': 0.917, 'eurosat': 0.967, 'dtd': 0.793},
     'CLIP': {'cifar100': 0.762, 'svhn': 0.902, 'gtsrb': 0.967, 'eurosat': 0.982, 'dtd': 0.738},
     'DeiT-III': {'cifar100': 0.715, 'svhn': 0.875, 'gtsrb': 0.965, 'eurosat': 0.965, 'dtd': 0.673},
     'MoCo-v3': {'cifar100': 0.695, 'svhn': 0.887, 'gtsrb': 0.963, 'eurosat': 0.972, 'dtd': 0.648},
+    'iBOT': {'cifar100': 0.345, 'svhn': 0.837, 'gtsrb': 0.952, 'eurosat': 0.972, 'dtd': 0.592},
+    'DINOv1': {'cifar100': 0.698, 'svhn': 0.850, 'gtsrb': 0.902, 'eurosat': 0.968, 'dtd': 0.683},
+    'Supervised': {'cifar100': 0.670, 'svhn': 0.838, 'gtsrb': 0.900, 'eurosat': 0.957, 'dtd': 0.640},
+    'MAE': {'cifar100': 0.483, 'svhn': 0.895, 'gtsrb': 0.960, 'eurosat': 0.950, 'dtd': 0.597},
 }
 
 
-def load_model(name, device):
+def load_model(name, device, ibot_checkpoint=None):
     if name == 'MoCo-v3':
         model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
         url = 'https://dl.fbaipublicfiles.com/moco-v3/vit-b-300ep/vit-b-300ep.pth.tar'
@@ -62,7 +59,38 @@ def load_model(name, device):
         if 'state_dict' in sd:
             sd = {k.replace('module.', '').replace('base_encoder.', ''): v
                   for k, v in sd['state_dict'].items()}
-        model.load_state_dict(sd, strict=False)
+        msg = model.load_state_dict(sd, strict=False)
+        print(f"  MoCo-v3 loaded (missing: {len(msg.missing_keys)}, unexpected: {len(msg.unexpected_keys)})")
+        return model.to(device)
+    elif name == 'iBOT':
+        model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
+        candidates = [ibot_checkpoint] if ibot_checkpoint else []
+        candidates.extend([
+            '/content/ibot/checkpoint_teacher.pth',
+            '/content/checkpoint_teacher.pth',
+            'checkpoint_teacher.pth',
+        ])
+        ckpt_path = next((x for x in candidates if x and os.path.isfile(x)), None)
+        if ckpt_path is None:
+            raise FileNotFoundError(f"iBOT checkpoint not found. Tried: {candidates}")
+        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+            sd = checkpoint['state_dict']
+        elif isinstance(checkpoint, dict) and 'teacher' in checkpoint:
+            sd = checkpoint['teacher']
+        else:
+            sd = checkpoint
+        cleaned = {}
+        for key, value in sd.items():
+            new_key = key
+            for prefix in ('module.', 'teacher.', 'backbone.'):
+                if new_key.startswith(prefix):
+                    new_key = new_key[len(prefix):]
+            if new_key.startswith(('head.', 'last_layer.', 'student_head.', 'teacher_head.')):
+                continue
+            cleaned[new_key] = value
+        msg = model.load_state_dict(cleaned, strict=False)
+        print(f"  iBOT loaded from {ckpt_path} (missing: {len(msg.missing_keys)}, unexpected: {len(msg.unexpected_keys)})")
         return model.to(device)
     else:
         return timm.create_model(BACKBONES[name][0], pretrained=True, img_size=224).to(device)
@@ -72,6 +100,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--backbones', nargs='+', default=['DINOv2', 'CLIP', 'DeiT-III'])
     parser.add_argument('--tasks', nargs='+', default=['cifar100'])
+    parser.add_argument('--ibot_checkpoint', default=None)
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
 
@@ -92,7 +121,7 @@ def main():
         print(f"  Capacity LR Sweep: {bb_name}")
         print(f"{'='*60}")
 
-        base_model = load_model(bb_name, device)
+        base_model = load_model(bb_name, device, ibot_checkpoint=args.ibot_checkpoint)
         config.embed_dim = base_model.embed_dim
         config.num_layers = len(base_model.blocks)
         config.num_heads = base_model.blocks[0].attn.num_heads
@@ -118,7 +147,6 @@ def main():
                 lr_results = {}
 
                 for lr in VPT_LRS:
-                    # Use seed 42 for single-seed LR sweep
                     torch.manual_seed(42); np.random.seed(42)
                     ds = load_dataset(task, 224, max_samples=1000)
                     nv = min(200, len(ds) // 5)
@@ -150,12 +178,10 @@ def main():
 
             all_results[bb_name][task_key] = task_results
 
-            # Save incrementally
             os.makedirs('results', exist_ok=True)
             with open(SAVE_PATH, 'w') as f:
                 json.dump(all_results, f, indent=2)
 
-            # Summary for this backbone-task
             lora_acc = LORA_BEST.get(bb_name, {}).get(task, None)
             print(f"\n    === {bb_name} x {task} SUMMARY ===")
             for p in PROMPT_COUNTS:
@@ -179,7 +205,6 @@ def main():
 
         del base_model; torch.cuda.empty_cache()
 
-    # Final summary
     print(f"\n{'='*60}")
     print("OVERALL: Does capacity crash survive LR tuning?")
     print(f"{'='*60}")
