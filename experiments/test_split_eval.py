@@ -56,16 +56,14 @@ TASKS = {
     'dtd':       {'num_classes': 47,  'dataset': 'DTD'},
 }
 
-# Best LRs from the main comparison (per backbone)
-BEST_LRS = {
-    'DINOv2':     {'lora': 2e-3, 'vpt': 2e-3},
-    'iBOT':       {'lora': 5e-3, 'vpt': 5e-3},
-    'DINOv1':     {'lora': 2e-3, 'vpt': 5e-4},
-    'CLIP':       {'lora': 2e-3, 'vpt': 2e-3},
-    'DeiT-III':   {'lora': 5e-3, 'vpt': 1e-3},
-    'Supervised': {'lora': 5e-3, 'vpt': 1e-3},
-    'MoCo-v3':    {'lora': 1e-2, 'vpt': 1e-2},
-    'MAE':        {'lora': 1e-3, 'vpt': 1e-3},
+# LR grids (same as paper protocol)
+LORA_LRS = [2e-4, 5e-4, 1e-3, 2e-3, 5e-3]
+VPT_LRS_LOW = [5e-4, 1e-3, 2e-3]        # σ²_P < 0.7
+VPT_LRS_HIGH = [2e-3, 5e-3, 1e-2]       # σ²_P ≥ 0.7
+
+SIGMA_P = {
+    'DINOv2': 0.22, 'iBOT': 0.15, 'DINOv1': 0.19, 'CLIP': 0.18,
+    'DeiT-III': 1.04, 'Supervised': 1.60, 'MoCo-v3': 2.31, 'MAE': 1.76,
 }
 
 
@@ -288,6 +286,55 @@ def main():
             test_loader = DataLoader(test_ds, batch_size=64, shuffle=False, num_workers=2)
             print(f"    Test set: {len(test_ds)} examples")
 
+            # ===== PHASE 1: LR sweep on seed 42 (val-based selection) =====
+            vpt_lrs = VPT_LRS_LOW if SIGMA_P[bb_name] < 0.7 else VPT_LRS_HIGH
+            print(f"    Phase 1: LR sweep (seed 42)")
+            print(f"      LoRA LRs: {LORA_LRS}")
+            print(f"      VPT LRs:  {vpt_lrs} (σ²_P={SIGMA_P[bb_name]})")
+
+            sweep_seed = 42
+            torch.manual_seed(sweep_seed); np.random.seed(sweep_seed)
+            train_ds_sweep, val_ds_sweep = get_train_val_split(task_name, seed=sweep_seed)
+            tl_sweep = DataLoader(train_ds_sweep, batch_size=64, shuffle=True, num_workers=2)
+            vl_sweep = DataLoader(val_ds_sweep, batch_size=64, shuffle=False, num_workers=2)
+
+            # Sweep LoRA
+            best_lora_lr, best_lora_val = None, -1
+            for lr in LORA_LRS:
+                m = deepcopy(base_model)
+                m.head = nn.Linear(config.embed_dim, num_classes).to(device)
+                m = apply_lora(m, 8, config)
+                m = m.to(device)
+                config.lr = lr
+                val_acc, _, _ = train_and_eval_with_test(m, tl_sweep, vl_sweep, test_loader, config, device)
+                if val_acc > best_lora_val:
+                    best_lora_val = val_acc
+                    best_lora_lr = lr
+                del m; torch.cuda.empty_cache()
+                print(f"      LoRA LR={lr:.0e}: val={val_acc:.3f}")
+
+
+            print(f"      → Best LoRA LR: {best_lora_lr:.0e} (val={best_lora_val:.3f})")
+
+            # Sweep VPT
+            best_vpt_lr, best_vpt_val = None, -1
+            for lr in vpt_lrs:
+                m = deepcopy(base_model)
+                m.head = nn.Linear(config.embed_dim, num_classes).to(device)
+                m = apply_vpt(m, 5, config)
+                m = m.to(device)
+                config.lr = lr
+                val_acc, _, _ = train_and_eval_with_test(m, tl_sweep, vl_sweep, test_loader, config, device)
+                if val_acc > best_vpt_val:
+                    best_vpt_val = val_acc
+                    best_vpt_lr = lr
+                del m; torch.cuda.empty_cache()
+                print(f"      VPT  LR={lr:.0e}: val={val_acc:.3f}")
+            print(f"      → Best VPT LR:  {best_vpt_lr:.0e} (val={best_vpt_val:.3f})")
+
+            # ===== PHASE 2: 3-seed evaluation at chosen LRs =====
+            print(f"    Phase 2: 3-seed eval (LoRA@{best_lora_lr:.0e}, VPT@{best_vpt_lr:.0e})")
+
             seed_results = {}
             for seed in args.seeds:
                 print(f"    Seed {seed}:")
@@ -300,7 +347,7 @@ def main():
                 m.head = nn.Linear(config.embed_dim, num_classes).to(device)
                 m = apply_lora(m, 8, config)
                 m = m.to(device)
-                config.lr = BEST_LRS[bb_name]['lora']
+                config.lr = best_lora_lr
                 lora_val, lora_test_best, lora_test_last = \
                     train_and_eval_with_test(m, train_loader, val_loader, test_loader, config, device)
                 del m; torch.cuda.empty_cache()
@@ -310,7 +357,7 @@ def main():
                 m.head = nn.Linear(config.embed_dim, num_classes).to(device)
                 m = apply_vpt(m, 5, config)
                 m = m.to(device)
-                config.lr = BEST_LRS[bb_name]['vpt']
+                config.lr = best_vpt_lr
                 vpt_val, vpt_test_best, vpt_test_last = \
                     train_and_eval_with_test(m, train_loader, val_loader, test_loader, config, device)
                 del m; torch.cuda.empty_cache()
@@ -320,6 +367,8 @@ def main():
                 gap_test_last = lora_test_last - vpt_test_last
 
                 seed_results[str(seed)] = {
+                    'lora_lr': float(best_lora_lr),
+                    'vpt_lr': float(best_vpt_lr),
                     'lora_val': float(lora_val),
                     'lora_test_best': float(lora_test_best),
                     'lora_test_last': float(lora_test_last),
