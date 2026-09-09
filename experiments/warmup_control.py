@@ -29,8 +29,13 @@ DATA_ROOT = os.path.expanduser('~/data')
 
 BACKBONES = {
     'DINOv2': 'vit_base_patch14_dinov2.lvd142m',
+    'iBOT': None,
+    'DINOv1': 'vit_base_patch16_224.dino',
     'CLIP': 'vit_base_patch16_clip_224.openai',
-    'DeiT-III': 'deit3_base_patch16_224',  # high σ²_P control
+    'DeiT-III': 'deit3_base_patch16_224',
+    'Supervised': 'vit_base_patch16_224.augreg_in1k',
+    'MoCo-v3': None,
+    'MAE': 'vit_base_patch16_224.mae',
 }
 
 from config import ExperimentConfig, setup_device
