@@ -69,44 +69,77 @@ BEST_LRS = {
 }
 
 
-def get_test_dataset(task_name, img_size=224):
-    """Load the official test split for each dataset."""
-    transform = transforms.Compose([
+DATA_ROOT = os.path.expanduser('~/data')
+
+
+def get_transform(img_size=224):
+    return transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    data_root = os.path.expanduser('~/data')
+
+def get_train_dataset(task_name, img_size=224):
+    """Load the official train split for each dataset."""
+    transform = get_transform(img_size)
 
     if task_name == 'cifar100':
-        return datasets.CIFAR100(root=data_root, train=False, transform=transform, download=True)
+        return datasets.CIFAR100(root=DATA_ROOT, train=True, transform=transform, download=True)
     elif task_name == 'svhn':
-        return datasets.SVHN(root=data_root, split='test', transform=transform, download=True)
+        return datasets.SVHN(root=DATA_ROOT, split='train', transform=transform, download=True)
     elif task_name == 'gtsrb':
-        return datasets.GTSRB(root=data_root, split='test', transform=transform, download=True)
+        return datasets.GTSRB(root=DATA_ROOT, split='train', transform=transform, download=True)
     elif task_name == 'eurosat':
-        # EuroSAT doesn't have an official split — use a fixed 20% holdout
-        ds = datasets.EuroSAT(root=data_root, transform=transform, download=True)
+        ds = datasets.EuroSAT(root=DATA_ROOT, transform=transform, download=True)
+        n = len(ds)
+        n_test = n // 5
+        train_ds, _ = random_split(ds, [n - n_test, n_test],
+                                    generator=torch.Generator().manual_seed(0))
+        return train_ds
+    elif task_name == 'dtd':
+        return datasets.DTD(root=DATA_ROOT, split='train', transform=transform, download=True)
+    else:
+        raise ValueError(f"Unknown task: {task_name}")
+
+
+def get_test_dataset(task_name, img_size=224):
+    """Load the official test split for each dataset."""
+    transform = get_transform(img_size)
+
+    if task_name == 'cifar100':
+        return datasets.CIFAR100(root=DATA_ROOT, train=False, transform=transform, download=True)
+    elif task_name == 'svhn':
+        return datasets.SVHN(root=DATA_ROOT, split='test', transform=transform, download=True)
+    elif task_name == 'gtsrb':
+        return datasets.GTSRB(root=DATA_ROOT, split='test', transform=transform, download=True)
+    elif task_name == 'eurosat':
+        ds = datasets.EuroSAT(root=DATA_ROOT, transform=transform, download=True)
         n = len(ds)
         n_test = n // 5
         _, test_ds = random_split(ds, [n - n_test, n_test],
                                    generator=torch.Generator().manual_seed(0))
         return test_ds
     elif task_name == 'dtd':
-        return datasets.DTD(root=data_root, split='test', transform=transform, download=True)
+        return datasets.DTD(root=DATA_ROOT, split='test', transform=transform, download=True)
     else:
         raise ValueError(f"Unknown task: {task_name}")
 
 
-def get_train_val_dataset(task_name, img_size=224, n_train=800, n_val=200, seed=42):
-    """Load training data: n_train for training, n_val for validation/checkpoint selection."""
-    from run_all_backbones import load_dataset
+def get_train_val_split(task_name, img_size=224, n_total=1000, n_val=200, seed=42):
+    """Sample n_total from train set, split into train/val."""
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    ds = load_dataset(task_name, img_size, max_samples=n_train + n_val)
-    train_ds, val_ds = random_split(ds, [n_train, n_val],
+    full_train = get_train_dataset(task_name, img_size)
+
+    # Subsample to n_total
+    indices = torch.randperm(len(full_train), generator=torch.Generator().manual_seed(seed))[:n_total]
+    subset = Subset(full_train, indices.tolist())
+
+    # Split into train and val
+    n_train = n_total - n_val
+    train_ds, val_ds = random_split(subset, [n_train, n_val],
                                      generator=torch.Generator().manual_seed(seed))
     return train_ds, val_ds
 
@@ -258,7 +291,7 @@ def main():
             seed_results = {}
             for seed in args.seeds:
                 print(f"    Seed {seed}:")
-                train_ds, val_ds = get_train_val_dataset(task_name, seed=seed)
+                train_ds, val_ds = get_train_val_split(task_name, seed=seed)
                 train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=2)
                 val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=2)
 
