@@ -106,9 +106,13 @@ def load_model(name, device, ibot_checkpoint=None):
         return model.to(device)
     elif name == 'DeiT-III':
         model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
-        url = 'https://dl.fbaipublicfiles.com/deit/deit_3_base_224_21k.pth'
+        url = 'https://dl.fbaipublicfiles.com/deit/deit_3_base_224_1k.pth'
         sd = torch.hub.load_state_dict_from_url(url, map_location='cpu')
         if 'model' in sd: sd = sd['model']
+        # Handle pos_embed size mismatch (196 vs 197)
+        if 'pos_embed' in sd and sd['pos_embed'].shape[1] != model.pos_embed.shape[1]:
+            cls_pos = model.pos_embed[:, :1, :]
+            sd['pos_embed'] = torch.cat([cls_pos, sd['pos_embed']], dim=1)
         model.load_state_dict(sd, strict=False)
         return model.to(device)
     elif name == 'Supervised':
