@@ -1,8 +1,8 @@
-# ATLAS: Adaptation Theory — Limits, Approximation, and Selection
+# ATLAS: Not a Fair Fight — Learning-Rate Tuning Tips the LoRA vs VPT Balance
 
-> **A Unified Theory of Adaptation Efficiency in Vision Foundation Models**
+> **An empirical study showing that conflicting LoRA-vs-VPT conclusions largely stem from asymmetric learning-rate tuning**
 
-[![Paper](https://img.shields.io/badge/Paper-TPAMI%20(under%20review)-blue)]()
+[![Paper](https://img.shields.io/badge/Paper-TMLR%20(under%20review)-blue)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)]()
 
@@ -10,27 +10,47 @@
 
 ## Overview
 
-ATLAS provides a **unified theoretical framework** for understanding and selecting parameter-efficient fine-tuning (PEFT) methods for Vision Transformers. We prove that LoRA, VPT, and Adapters have fundamentally different expressiveness characteristics, derive their approximation rates as continuous functions of measurable task properties, and provide a principled selection algorithm that achieves near-oracle performance with 10× less compute.
+Published comparisons between LoRA and Visual Prompt Tuning (VPT) on Vision Transformers disagree on which method is better. We show that a plausible source of this disagreement is a **two-sided learning-rate interaction**: both methods are sensitive to per-backbone LR tuning, but in opposite directions.
 
-### Key Contributions
+After sweeping both methods' LRs across **8 ViT-B backbones × 5 tasks** (3 seeds, official test splits):
 
-| Theorem | Result | Practical Impact |
-|---------|--------|-----------------|
-| **Separation (Thm 1)** | LoRA and VPT have provably different expressiveness on different task types | Explains *why* no single PEFT method dominates |
-| **Rates (Thm 2)** | Closed-form approximation rates parameterized by spectral decay α | Predicts how accuracy scales with rank/prompt count |
-| **Bounds (Thm 3)** | PAC-Bayes generalization bounds with method-specific priors | LoRA's KL = nuclear norm (structural advantage) |
-| **Selection (Thm 5)** | Near-optimal method selection from a 2-epoch pilot | 10× compute savings over exhaustive search |
+- **LoRA wins or ties on 37/40 pairs** (20 wins, 17 ties, 3 VPT wins)
+- The 3 VPT wins are on MoCo-v3 (CIFAR-100, DTD) and iBOT (CIFAR-100)
+- Threshold sensitivity: 36–38/40 at any threshold in [1%, 3%]
 
-### Core Insight
+### Key Findings
 
-Every downstream task decomposes into an **attention shift** (which patches to attend to) and a **feature shift** (what features to extract). Different PEFT methods address different components:
+| Finding | Evidence |
+|---------|----------|
+| **Two-sided LR interaction** | DINOv1 DTD: VPT "wins" by 6% → tie after sweeping LoRA's LR |
+| **Warmup fixes VPT crashes** | DINOv2 at LR=1e-2: 0.386±0.224 → 0.781±0.017 with 10-epoch warmup |
+| **σ²_P correlates with instability** | All drops >10 pts occur at σ²_P < 0.7 (44/44 informative sweeps) |
+| **LP confirms prompt-specificity** | LP at LR=1e-2 shows no crash on any backbone; VPT drops 60 pts |
+| **Capacity is task-dependent** | p=50 helps on GTSRB (+1 to +3 pts), hurts on CIFAR-100 (up to -37 pts) |
+| **Regret analysis** | Always picking swept LoRA costs only 0.3 pts vs oracle |
 
-| Method | Attention Shift | Feature Shift | Capacity |
-|--------|:-:|:-:|:-:|
-| **LoRA** | ✓ (via W_Q, W_K) | ✓ (via W_V) | rank r |
-| **VPT** | ✓ (via prompt steering) | ✗ (frozen W_V) | prompt count p |
-| **Adapter** | ✗ (frozen attention) | ✓ (via bottleneck) | bottleneck dim r_a |
-| **Linear Probe** | ✗ | ✗ | — |
+### Practical Recommendation
+
+**Use warmup for VPT, sweep LR for LoRA.** (Algorithm 1 in the paper)
+
+---
+
+## Backbones
+
+| Backbone | Pretraining | σ²_P | L/T/V |
+|----------|-------------|------|-------|
+| DINOv2 | Self-distillation | 0.22 | 2/3/0 |
+| iBOT | Self-distillation | 0.15 | 2/2/1 |
+| DINOv1 | Self-distillation | 0.19 | 3/2/0 |
+| CLIP | Contrastive | 0.18 | 2/3/0 |
+| DeiT-III | Supervised | 1.04 | 3/2/0 |
+| Supervised | Supervised | 1.60 | 2/3/0 |
+| MoCo-v3 | Contrastive | 2.31 | 2/1/2 |
+| MAE | Masked autoencoding | 1.76 | 4/1/0 |
+
+## Tasks
+
+CIFAR-100, SVHN, GTSRB, EuroSAT, DTD — all at n=1000 per task.
 
 ---
 
@@ -38,35 +58,32 @@ Every downstream task decomposes into an **attention shift** (which patches to a
 
 ```
 ATLAS/
-├── README.md                       # This file
-├── LICENSE                         # MIT License
-├── requirements.txt                # Python dependencies
-├── setup.py                        # Package setup
+├── README.md
+├── experiments/
+│   ├── test_split_eval.py          # Main comparison (40/40, test splits, 3 seeds)
+│   ├── linear_probe.py             # LP baseline (8 backbones)
+│   ├── warmup_control.py           # Warmup vs no-warmup (8 backbones)
+│   ├── reviewer_checks.py          # Seed verification + LP at high LR
+│   ├── lora_grid_check.py          # LoRA grid-edge check (13 cells)
+│   ├── lp_high_lr.py               # LP at 1e-2 (head-divergence control)
+│   ├── warmup_rerun.py             # With-warmup full comparison (future)
+│   ├── revision_vpt_full_sweep.py  # 7-point VPT LR sweeps
+│   ├── revision_capacity_lr_sweep.py  # Per-p LR tuning
+│   ├── sigma_ablation.py           # σ²_P ablation (8 statistics)
+│   ├── lora_small_rank.py          # LoRA r=1,2
+│   ├── dinov2_reg_sweep.py         # Register-prompt interference
+│   ├── weight_decay_sweep.py       # WD sensitivity check
+│   ├── grid_edge_check.py          # VPT grid-edge extension
+│   └── fft_lr_sweep.py             # Full fine-tuning baseline
 │
-├── theory/                         # Formal proofs and analysis
-│   ├── paper_framework.md          # Problem formulation & notation
-│   ├── theorem1_proof.md           # Expressiveness separation proof
-│   ├── softmax_analysis.md         # Softmax Lipschitz analysis
-│   ├── lemma3_and_review.md        # VPT relay construction & critical review
-│   ├── theorem2_proof.md           # Approximation rates proof
-│   ├── theorem2_review_and_theorem3.md  # Theorem 2 errata + Theorem 3
-│   ├── consolidated_review_and_theorem5.md  # Final review + Theorem 5
-│   └── assumption_a_analysis.md    # Assumption A validation results
+├── paper/
+│   └── tmlr/
+│       ├── atlas_tmlr.tex          # Main manuscript
+│       ├── atlas_tmlr.bib          # References
+│       └── figures/                # Paper figures
 │
-├── experiments/                    # Experimental code
-│   ├── README.md                   # Experiment documentation
-│   ├── config.py                   # Configuration & shared utilities
-│   ├── exp1_spectral.py            # Spectral profile analysis
-│   ├── exp2_comparison.py          # PEFT method comparison
-│   ├── exp3_selection.py           # Selection algorithm benchmark
-│   ├── validate_assumption_a.py    # Assumption A verification
-│   └── run_all.py                  # Main experiment runner
-│
-├── paper/                          # LaTeX manuscript (forthcoming)
-│   └── .gitkeep
-│
-└── figures/                        # Generated figures
-    └── .gitkeep
+├── config.py                       # Shared configuration
+└── exp2_comparison.py              # LoRA/VPT application utilities
 ```
 
 ---
@@ -81,78 +98,79 @@ cd ATLAS
 pip install -r requirements.txt
 ```
 
-### Run Experiments
+### Run the Main Comparison
 
 ```bash
-# Quick test run (~30 minutes, synthetic data)
-cd experiments
-python run_all.py --fast
+# Full 40-cell test-split evaluation (all 8 backbones, 3 seeds)
+python experiments/test_split_eval.py --resume
 
-# Full experiments (~8 hours, requires GPU)
-python run_all.py
+# Specific backbones
+python experiments/test_split_eval.py --backbones DINOv2 CLIP --resume
 
-# Individual experiments
-python run_all.py --exp spectral      # Spectral decay analysis
-python run_all.py --exp comparison    # LoRA vs VPT vs Adapter comparison
-python run_all.py --exp selection     # Selection algorithm benchmark
+# Single cell
+python experiments/test_split_eval.py --backbones DINOv2 --tasks cifar100
 ```
 
-### Use the Selection Algorithm
+### Run Controls
 
-```python
-from experiments.exp3_selection import SelectionAlgorithm
-from experiments.config import ExperimentConfig
+```bash
+# Linear probe baseline (all 8 backbones)
+python experiments/linear_probe.py --resume
 
-config = ExperimentConfig()
-selector = SelectionAlgorithm(config)
+# Warmup control (all 8 backbones)
+python experiments/warmup_control.py --resume
 
-# Phase 1: Run a 5-epoch pilot fine-tuning
-selector.run_pilot(model, train_loader, val_loader, pretrained_state, n_classes, device)
+# Seed verification + LP at high LR
+python experiments/reviewer_checks.py
 
-# Phase 2: Score all methods
-scores = selector.compute_scores()
+# LoRA grid-edge check
+python experiments/lora_grid_check.py --backbones DeiT-III MoCo-v3 MAE Supervised
+```
 
-# Phase 3: Get recommendation
-best_method, best_score = selector.select()
-print(f"Recommended: {best_method} (score: {best_score['score']:.4f})")
+### Run Secondary Experiments
+
+```bash
+# σ²_P validation (7-point VPT sweeps)
+python experiments/revision_vpt_full_sweep.py
+
+# Capacity sweep (per-p LR tuning)
+python experiments/revision_capacity_lr_sweep.py
+
+# LoRA r=1,2
+python experiments/lora_small_rank.py
+
+# Register-prompt interference
+python experiments/dinov2_reg_sweep.py
 ```
 
 ---
 
-## Theoretical Results
+## Results Summary
 
-### Theorem 1: Expressiveness Separation
+### Main Comparison (Table 3, test splits)
 
-There exist task distributions where:
+LoRA r=8 Q/V (295K params) vs VPT p=5 deep (46K params), evaluated on official test splits:
 
-**(a) VPT beats LoRA by Ω(N):** On attention-steering tasks (counting, spatial reasoning), VPT with √N prompts achieves O(1/N²) error while LoRA with rank r achieves Ω(1/N) error — a gap of ~196× for ViT-B.
+| | LoRA wins | Ties | VPT wins |
+|---|---|---|---|
+| **Count** | 20 | 17 | 3 |
+| **At ±1%** | 24 | 12 | 4 |
+| **At ±3%** | 17 | 21 | 2 |
 
-**(b) LoRA beats VPT by ∞:** On feature-discrimination tasks (fine-grained classification), LoRA achieves zero error with sufficient rank, while VPT has **irreducible error** ≥ sin²θ > 0 for any number of prompts.
+### Regret Analysis
 
-### Theorem 2: Approximation Rates
+| Strategy | Mean regret | Max regret |
+|----------|-------------|------------|
+| Always LoRA (swept) | **0.30 pts** | 4.1 pts |
+| Always VPT (swept) | 3.89 pts | 23.8 pts |
 
-For a task with spectral decay σ_k ≤ C·k^{-α}:
+### Warmup Control (CIFAR-100, LR=1e-2)
 
-- **LoRA(r):** ε = O(r^{1−2α}) — decays to zero, rate controlled by α
-- **VPT(p):** ε = O(Q(a*,p)) + S_feat·sin²θ — decays then **plateaus**
-- **Adapter(r_a):** ε = S_attn + O(r_a^{1−2α}) — **floor** from attention
-
-### Theorem 3: Generalization
-
-LoRA has a structural advantage: its KL divergence equals the **nuclear norm** of the weight shift (Σ σ_k), not the parameter count. For fast-decaying spectra, this is much smaller, explaining LoRA's strong generalization at low data counts.
-
-### Theorem 5: Selection Algorithm
-
-A 2-epoch pilot fine-tuning suffices to estimate task descriptors and select the near-optimal PEFT method with regret O(1/√n) over the oracle, saving ~10× compute.
-
----
-
-## Key Assumptions
-
-| Assumption | Content | Justification |
-|---|---|---|
-| **A** (Steerability) | Pretrained ViT has position-aware attention heads | Empirical: all standard ViTs (DINOv2, CLIP, MAE) develop position-specialized heads |
-| **B** (Well-conditioned) | Residual stream Lipschitz constant O(1) | Standard for ViTs with LayerNorm |
+| Backbone | No warmup | 10-ep warmup | Δ |
+|----------|-----------|-------------|---|
+| DINOv2 | 0.386±0.224 | 0.781±0.017 | **+39.6** |
+| DINOv1 | 0.406±0.092 | 0.619±0.002 | **+21.3** |
+| Others | modest or none | | +2.8 to +5.9 |
 
 ---
 
@@ -160,10 +178,10 @@ A 2-epoch pilot fine-tuning suffices to estimate task descriptors and select the
 
 ```bibtex
 @article{atlas2026,
-  title={A Unified Theory of Adaptation Efficiency in Vision Foundation Models: 
-         Expressiveness, Generalization, and Optimal Method Selection},
+  title={Not a Fair Fight: Learning-Rate Tuning Tips the 
+         {LoRA} vs {VPT} Balance on Vision Transformers},
   author={},
-  journal={IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  journal={Transactions on Machine Learning Research},
   year={2026},
   note={Under review}
 }
