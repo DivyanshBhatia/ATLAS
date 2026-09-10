@@ -23,9 +23,9 @@ DATA_ROOT = os.path.expanduser('~/data')
 LP_LRS = [1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1]
 
 BACKBONES = {
-    'DINOv1': 'vit_base_patch16_224.dino',
-    'Supervised': 'vit_base_patch16_224.augreg_in1k',
-    'MAE': 'vit_base_patch16_224.mae',
+    'DINOv1': None,
+    'Supervised': 'vit_base_patch16_224',
+    'MAE': None,
     'iBOT': None,
 }
 
@@ -39,7 +39,21 @@ def get_transform():
 
 
 def load_model(name, device, ibot_checkpoint=None):
-    if name == 'iBOT':
+    if name == 'DINOv1':
+        model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
+        url = 'https://dl.fbaipublicfiles.com/dino/dino_vitbase16_pretrain/dino_vitbase16_pretrain.pth'
+        sd = torch.hub.load_state_dict_from_url(url, map_location='cpu')
+        model.load_state_dict(sd, strict=False)
+        return model.to(device)
+    elif name == 'MAE':
+        model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
+        url = 'https://dl.fbaipublicfiles.com/mae/pretrain/mae_pretrain_vit_base.pth'
+        sd = torch.hub.load_state_dict_from_url(url, map_location='cpu')
+        if 'model' in sd:
+            sd = sd['model']
+        model.load_state_dict(sd, strict=False)
+        return model.to(device)
+    elif name == 'iBOT':
         model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
         candidates = [ibot_checkpoint, '/content/ibot/checkpoint_teacher.pth',
                       '/content/checkpoint_teacher.pth']
