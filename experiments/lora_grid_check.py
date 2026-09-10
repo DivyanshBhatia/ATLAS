@@ -146,17 +146,23 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--ibot_checkpoint', default=None)
+    parser.add_argument('--backbones', nargs='+', default=None,
+                        help='Filter to specific backbones, e.g. --backbones DeiT-III MoCo-v3')
     args = parser.parse_args()
 
     device = setup_device()
     config = ExperimentConfig()
+
+    cells = EDGE_CELLS
+    if args.backbones:
+        cells = [(bb, task) for bb, task in EDGE_CELLS if bb in args.backbones]
 
     print("=" * 60)
     print("  LoRA at 1e-2: Grid Edge Check (13 cells)")
     print("=" * 60)
 
     loaded = {}
-    for bb_name, task_name in EDGE_CELLS:
+    for bb_name, task_name in cells:
         if bb_name not in loaded:
             loaded[bb_name] = load_model(bb_name, device, args.ibot_checkpoint)
 
