@@ -104,6 +104,16 @@ def load_model(name, device, ibot_checkpoint=None):
         if 'model' in sd: sd = sd['model']
         model.load_state_dict(sd, strict=False)
         return model.to(device)
+    elif name == 'DeiT-III':
+        model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
+        url = 'https://dl.fbaipublicfiles.com/deit/deit_3_base_224_21k.pth'
+        sd = torch.hub.load_state_dict_from_url(url, map_location='cpu')
+        if 'model' in sd: sd = sd['model']
+        model.load_state_dict(sd, strict=False)
+        return model.to(device)
+    elif name == 'Supervised':
+        model = timm.create_model('vit_base_patch16_224', pretrained=True, img_size=224)
+        return model.to(device)
     else:
         return timm.create_model(BACKBONES[name], pretrained=True, img_size=224).to(device)
 
