@@ -79,7 +79,16 @@ def get_train_val(task_name, seed=42):
 
 
 def load_model(name, device, ibot_checkpoint=None):
-    if name == 'MoCo-v3':
+    if name == 'DINOv2':
+        model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        return model.to(device)
+    elif name == 'CLIP':
+        try:
+            model = timm.create_model('vit_base_patch16_clip_224.openai', pretrained=True, img_size=224)
+        except RuntimeError:
+            model = timm.create_model('vit_base_patch16_224', pretrained=True, img_size=224)
+        return model.to(device)
+    elif name == 'MoCo-v3':
         model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
         url = 'https://dl.fbaipublicfiles.com/moco-v3/vit-b-300ep/vit-b-300ep.pth.tar'
         sd = torch.hub.load_state_dict_from_url(url, map_location='cpu')
