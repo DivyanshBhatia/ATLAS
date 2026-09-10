@@ -29,13 +29,13 @@ DATA_ROOT = os.path.expanduser('~/data')
 
 BACKBONES = {
     'DINOv2': 'vit_base_patch14_dinov2.lvd142m',
-    'iBOT': None,
-    'DINOv1': 'vit_base_patch16_224.dino',
     'CLIP': 'vit_base_patch16_clip_224.openai',
     'DeiT-III': 'deit3_base_patch16_224',
+    'DINOv1': 'vit_base_patch16_224.dino',
     'Supervised': 'vit_base_patch16_224.augreg_in1k',
-    'MoCo-v3': None,
     'MAE': 'vit_base_patch16_224.mae',
+    'iBOT': None,
+    'MoCo-v3': None,
 }
 
 from config import ExperimentConfig, setup_device
@@ -129,14 +129,44 @@ def train_vpt_with_warmup(model, train_loader, val_loader, test_loader,
     return best_val_acc, test_acc
 
 
-def load_model(name, device):
-    return timm.create_model(BACKBONES[name], pretrained=True, img_size=224).to(device)
+def load_model(name, device, ibot_checkpoint=None):
+    if name == 'MoCo-v3':
+        model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
+        url = 'https://dl.fbaipublicfiles.com/moco-v3/vit-b-300ep/vit-b-300ep.pth.tar'
+        sd = torch.hub.load_state_dict_from_url(url, map_location='cpu')
+        if 'state_dict' in sd:
+            sd = {k.replace('module.', '').replace('base_encoder.', ''): v
+                  for k, v in sd['state_dict'].items()}
+        model.load_state_dict(sd, strict=False)
+        return model.to(device)
+    elif name == 'iBOT':
+        model = timm.create_model('vit_base_patch16_224', pretrained=False, img_size=224)
+        candidates = [ibot_checkpoint, '/content/ibot/checkpoint_teacher.pth',
+                      '/content/checkpoint_teacher.pth']
+        ckpt_path = next((x for x in candidates if x and os.path.isfile(x)), None)
+        if ckpt_path is None:
+            raise FileNotFoundError("iBOT checkpoint not found")
+        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        sd = checkpoint.get('teacher', checkpoint.get('state_dict', checkpoint))
+        cleaned = {}
+        for key, value in sd.items():
+            new_key = key
+            for prefix in ('module.', 'teacher.', 'backbone.'):
+                if new_key.startswith(prefix):
+                    new_key = new_key[len(prefix):]
+            if not new_key.startswith(('head.', 'last_layer.')):
+                cleaned[new_key] = value
+        model.load_state_dict(cleaned, strict=False)
+        return model.to(device)
+    else:
+        return timm.create_model(BACKBONES[name], pretrained=True, img_size=224).to(device)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--backbones', nargs='+', default=['DINOv2', 'CLIP', 'DeiT-III'])
     parser.add_argument('--task', default='cifar100')
+    parser.add_argument('--ibot_checkpoint', default=None)
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
 
@@ -161,7 +191,7 @@ def main():
         print(f"  Warmup Control: {bb_name} x {args.task}")
         print(f"{'='*60}")
 
-        base_model = load_model(bb_name, device)
+        base_model = load_model(bb_name, device, args.ibot_checkpoint)
         config.embed_dim = base_model.embed_dim
         config.num_layers = len(base_model.blocks)
         config.num_heads = base_model.blocks[0].attn.num_heads
